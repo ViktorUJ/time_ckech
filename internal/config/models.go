@@ -20,22 +20,34 @@ type AllowedSitesConfig struct {
 // AllowedSite — запись о разрешённом сайте.
 // Если AllowedPaths пуст — разрешён весь домен.
 // Если AllowedPaths задан — разрешены только URL, путь которых начинается с одного из указанных префиксов.
+// Category: "system" — всегда доступен, не считается развлечением; "" или "allowed" — обычный разрешённый.
 type AllowedSite struct {
 	Domain            string   `json:"domain"`
-	IncludeSubdomains bool     `json:"include_subdomains"` // default: true
-	AllowedPaths      []string `json:"allowed_paths"`      // например ["/edu", "/learning/"] — пустой = весь домен
+	IncludeSubdomains bool     `json:"include_subdomains"`        // default: true
+	AllowedPaths      []string `json:"allowed_paths,omitempty"`   // например ["/edu", "/learning/"] — пустой = весь домен
+	Category          string   `json:"category,omitempty"`        // "system" или "" (обычный)
 }
 
 // ScheduleConfig — расписание.
 type ScheduleConfig struct {
 	EntertainmentWindows  []TimeWindow    `json:"entertainment_windows"`
 	SleepTimes            []SleepTimeSlot `json:"sleep_times"`
-	WarningBeforeMinutes  int             `json:"warning_before_minutes"`       // default: 10
-	SleepWarningBeforeMin int             `json:"sleep_warning_before_minutes"` // default: 15
-	FullLogging           bool            `json:"full_logging"`                 // default: false
-	HTTPLogEnabled        bool            `json:"http_log_enabled"`             // default: false
-	HTTPLogPort           int             `json:"http_log_port"`                // default: 8080
-	EntertainmentApps     []string        `json:"entertainment_apps"`           // доп. exe-файлы развлекательных приложений
+	Holidays              []Holiday       `json:"holidays,omitempty"`               // праздники с датой и опциональным названием
+	HolidayWindows        []TimeWindow    `json:"holiday_windows,omitempty"`        // окна развлечений для праздников
+	HolidaySleepTimes     []SleepTimeSlot `json:"holiday_sleep_times,omitempty"`    // время сна для праздников
+	WarningBeforeMinutes  int             `json:"warning_before_minutes"`           // default: 10
+	SleepWarningBeforeMin int             `json:"sleep_warning_before_minutes"`     // default: 15
+	FullLogging           bool            `json:"full_logging"`                     // default: false
+	HTTPLogEnabled        bool            `json:"http_log_enabled"`                 // default: false
+	HTTPLogPort           int             `json:"http_log_port"`                    // default: 8080
+	EntertainmentApps     []string        `json:"entertainment_apps"`               // доп. exe-файлы развлекательных приложений
+	TotalComputerMinutes  int             `json:"total_computer_minutes,omitempty"` // лимит общего времени за компьютером (0 = без ограничений)
+}
+
+// Holiday — праздничный день.
+type Holiday struct {
+	Date string `json:"date"`           // "2026-01-01"
+	Name string `json:"name,omitempty"` // опциональное название праздника
 }
 
 // TimeWindow — временное окно для развлекательного контента.

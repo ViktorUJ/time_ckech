@@ -20,6 +20,8 @@ import (
 	"parental-control-service/internal/sleepmode"
 	"parental-control-service/internal/state"
 	"parental-control-service/internal/stats"
+	"parental-control-service/internal/learning"
+	"strings"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -29,6 +31,13 @@ const (
 	stateSaveInterval    = 60 * time.Second
 	configUpdateInterval = 5 * time.Minute
 )
+
+// sleepOverrideData — переопределение времени сна на сегодня.
+type sleepOverrideData struct {
+	Date     string // "2006-01-02"
+	NewStart string // "HH:MM" или "" (не менять)
+	NewEnd   string // "HH:MM" или "" (не менять)
+}
 
 // Service is the main orchestrator that ties all components together.
 type Service struct {
@@ -43,10 +52,13 @@ type Service struct {
 	httpServer     *httplog.HTTPLogServer
 	notifier       enforcer.Notifier
 	statsTracker   *stats.Tracker
+	learningCollector *learning.Collector
 
 	entertainmentSeconds int
+	computerSeconds      int // общее время за компьютером сегодня
 	currentWindowStart   string
 	currentWindowEnd     string
+	currentDayType       string // текущий тип дня для отслеживания смены
 	lastStateSave        time.Time
 	lastTick             time.Time
 	httpServerRunning    bool
@@ -56,12 +68,24 @@ type Service struct {
 	browserURLs   []httplog.BrowserURLEntry
 
 	// One-shot notification flags (reset on window/mode change).
-	notifiedLimitReached bool
-	notifiedSleepStart   bool
+	notifiedLimitReached  bool
+	notifiedSleepStart    bool
+	lastSleepWarnMinute   int // последняя минута на которой показали предупреждение о сне (-1 = не показывали)
+
+	// Счётчик тиков для отложенной блокировки сайтов.
+	siteWarningTicks map[string]int // domain → количество тиков с предупреждением
+
+	// Очередь уведомлений для tray.
+	notifMu     sync.Mutex
+	notifQueue  []httplog.Notification
 
 	// Пауза: временная приостановка всех ограничений.
 	pauseMu       sync.Mutex
 	pauseUntil    time.Time // нулевое значение = пауза не активна
+	serviceMode   string    // "normal", "filter_paused", "entertainment_paused", "learning"
+	modeUntil     time.Time // время окончания текущего режима (нулевое = бессрочно)
+	bonusSeconds  int       // бонусное время развлечений (может быть отрицательным)
+	sleepOverride *sleepOverrideData // переопределение сна на сегодня
 	passwordHash  string    // bcrypt hash из settings.json
 	dataDir       string    // путь к директории данных (для сохранения settings.json)
 }
@@ -96,6 +120,10 @@ func NewService(
 		statsTracker:   statsTracker,
 		passwordHash:   passwordHash,
 		dataDir:        dataDir,
+		serviceMode:    "normal",
+		learningCollector: learning.NewCollector(dataDir),
+		siteWarningTicks: make(map[string]int),
+		lastSleepWarnMinute: -1,
 	}
 }
 
@@ -106,6 +134,8 @@ func (s *Service) Run(ctx context.Context) error {
 	now := time.Now()
 	restored := s.stateManager.Restore(now)
 	s.entertainmentSeconds = restored.EntertainmentSeconds
+	s.computerSeconds = restored.ComputerSeconds
+	s.bonusSeconds = restored.BonusSeconds
 	s.lastTick = now
 	s.lastStateSave = now
 
@@ -113,6 +143,26 @@ func (s *Service) Run(ctx context.Context) error {
 	if !restored.WindowStart.IsZero() && !restored.WindowEnd.IsZero() {
 		s.currentWindowStart = restored.WindowStart.Format("15:04")
 		s.currentWindowEnd = restored.WindowEnd.Format("15:04")
+	}
+
+	// Restore sleep override (only if it's for today).
+	if restored.SleepOverrideDate == now.Format("2006-01-02") {
+		s.sleepOverride = &sleepOverrideData{
+			Date:     restored.SleepOverrideDate,
+			NewStart: restored.SleepOverrideStart,
+			NewEnd:   restored.SleepOverrideEnd,
+		}
+	}
+
+	// Restore service mode (if not expired).
+	if restored.ServiceMode != "" && restored.ServiceMode != "normal" {
+		if restored.ModeUntil.IsZero() || now.Before(restored.ModeUntil) {
+			s.serviceMode = restored.ServiceMode
+			s.modeUntil = restored.ModeUntil
+			if s.serviceMode == "filter_paused" || s.serviceMode == "unrestricted" {
+				s.pauseUntil = s.modeUntil
+			}
+		}
 	}
 
 	// Log service start.
@@ -135,10 +185,17 @@ func (s *Service) Run(ctx context.Context) error {
 	s.initialConfigLoad(ctx)
 
 	// Log service start (after config load so full_logging is enabled).
+	startNow := time.Now()
+	schedAtStart := s.scheduler.CurrentState(startNow)
+	s.currentDayType = string(schedAtStart.DayType)
+	startMsg := "ParentalControlService started. Schedule: " + s.currentDayType
+	if schedAtStart.HolidayName != "" {
+		startMsg += " (" + schedAtStart.HolidayName + ")"
+	}
 	_ = s.logger.LogEvent(logger.LogEntry{
-		Timestamp: time.Now(),
+		Timestamp: startNow,
 		EventType: logger.EventServiceStart,
-		Message:   "ParentalControlService started",
+		Message:   startMsg,
 	})
 
 	// 4. Start background config update goroutine.
@@ -192,8 +249,19 @@ func (s *Service) tick(ctx context.Context) {
 		return
 	}
 
+	// Режим обучения: логируем всё, но не блокируем.
+	isLearning := s.IsLearningMode()
+
+	// Собираем детальную информацию в режиме обучения.
+	if isLearning && s.learningCollector != nil {
+		s.learningCollector.CollectTick()
+	}
+
 	elapsed := now.Sub(s.lastTick)
 	s.lastTick = now
+
+	// Считаем общее время за компьютером (всегда, кроме паузы).
+	s.computerSeconds += int(elapsed.Seconds())
 
 	cfg := s.configManager.Current()
 	if cfg == nil {
@@ -205,16 +273,48 @@ func (s *Service) tick(ctx context.Context) {
 	// a. Check schedule → get current mode.
 	schedState := s.scheduler.CurrentState(now)
 
+	// Log day type change (workday/weekend/holiday).
+	newDayType := string(schedState.DayType)
+	if newDayType != s.currentDayType {
+		// Сброс счётчиков при смене дня.
+		if s.currentDayType != "" {
+			s.computerSeconds = 0
+			s.bonusSeconds = 0
+			s.sleepOverride = nil
+		}
+		dayMsg := "Schedule: " + newDayType
+		if schedState.HolidayName != "" {
+			dayMsg += " (" + schedState.HolidayName + ")"
+		}
+		_ = s.logger.LogEvent(logger.LogEntry{
+			Timestamp: now,
+			EventType: logger.EventInfo,
+			Message:   dayMsg,
+		})
+		s.currentDayType = newDayType
+	}
+
 	// Reset sleep notification flag when NOT in sleep mode.
 	if schedState.Mode != scheduler.ModeSleepTime {
 		s.notifiedSleepStart = false
 	}
 
 	// b. If sleep mode → enforce sleep (kill all user processes).
-	if schedState.Mode == scheduler.ModeSleepTime {
+	// В режиме обучения — не блокируем даже во время сна.
+	if schedState.Mode == scheduler.ModeSleepTime && !isLearning {
 		s.handleSleepMode(ctx, now)
 		s.maybeSaveState(now)
 		return
+	}
+
+	// b2. Check total computer time limit.
+	if cfg.Schedule.TotalComputerMinutes > 0 && !isLearning {
+		if s.computerSeconds/60 >= cfg.Schedule.TotalComputerMinutes {
+			// Лимит общего времени исчерпан — блокируем как при sleep mode.
+			s.handleSleepMode(ctx, now)
+			s.maybeSaveState(now)
+			return
+		}
 	}
 
 	// c. Scan processes → classify.
@@ -254,7 +354,8 @@ func (s *Service) tick(ctx context.Context) {
 	}
 
 	// f. Update entertainment counter (wall clock, only if restricted activity detected).
-	if hasRestrictedActivity {
+	// В режиме entertainment_paused — не считаем время развлечений.
+	if hasRestrictedActivity && !s.IsEntertainmentPaused() {
 		s.entertainmentSeconds += int(elapsed.Seconds())
 
 		// Log which restricted processes/sites are consuming entertainment time.
@@ -288,10 +389,14 @@ func (s *Service) tick(ctx context.Context) {
 	}
 
 	// g. Apply rules based on current mode.
-	limitMinutes := schedState.LimitMinutes
+	// В режиме обучения или entertainment_paused — не блокируем.
+	limitMinutes := schedState.LimitMinutes + s.bonusSeconds/60
+	if limitMinutes < 0 {
+		limitMinutes = 0
+	}
 	shouldBlock := enforcer.ShouldBlock(schedState.Mode, s.entertainmentSeconds, limitMinutes)
 
-	if shouldBlock {
+	if shouldBlock && !isLearning && !s.IsEntertainmentPaused() {
 		// Notify once when entertainment limit is reached.
 		if schedState.Mode == scheduler.ModeInsideWindow && !s.notifiedLimitReached {
 			msg := "Entertainment time is over. Restricted apps will be closed."
@@ -496,12 +601,13 @@ func (s *Service) blockRestricted(
 ) {
 	msg := blockMessage(mode, limitMinutes)
 
-	// Block restricted processes.
+	// Block restricted processes — сразу на первом тике.
 	for _, p := range processes {
 		if p.IsSystem || p.IsAllowed {
 			continue
 		}
-		if err := s.enforcer.BlockWithWarning(ctx, p.PID, msg); err != nil {
+		_ = s.notifier.ShowNotification("Parental Control", msg)
+		if err := s.enforcer.TerminateProcess(ctx, p.PID); err != nil {
 			log.Printf("[service] failed to block process %s (pid %d): %v", p.Name, p.PID, err)
 		}
 		_ = s.logger.LogEvent(logger.LogEntry{
@@ -513,19 +619,54 @@ func (s *Service) blockRestricted(
 		})
 	}
 
-	// Restricted сайты в браузерах закрываются через tray (WM_CLOSE на окно).
-	// Логируем блокировку.
+	// Restricted сайты — предупреждение, блокировка на 3-м тике.
+	const siteBlockAfterTicks = 3
 	for _, activity := range browserActivities {
 		if activity.IsAllowed {
 			continue
 		}
-		_ = s.logger.LogEvent(logger.LogEntry{
-			Timestamp: time.Now(),
-			EventType: logger.EventBlock,
-			URL:       activity.URL,
-			Browser:   activity.Browser,
-			Message:   fmt.Sprintf("Blocked site: %s (%s)", activity.Domain, activity.Browser),
-		})
+		s.siteWarningTicks[activity.Domain]++
+		ticks := s.siteWarningTicks[activity.Domain]
+
+		if ticks >= siteBlockAfterTicks {
+			// Блокируем — закрываем окно браузера.
+			_ = s.notifier.ShowNotification("Parental Control",
+				fmt.Sprintf("Blocked site: %s", activity.Domain))
+			_ = s.logger.LogEvent(logger.LogEntry{
+				Timestamp: time.Now(),
+				EventType: logger.EventBlock,
+				URL:       activity.URL,
+				Browser:   activity.Browser,
+				Message:   fmt.Sprintf("Blocked site: %s (%s)", activity.Domain, activity.Browser),
+			})
+			// Сбрасываем счётчик после блокировки.
+			delete(s.siteWarningTicks, activity.Domain)
+		} else {
+			// Предупреждение.
+			remaining := siteBlockAfterTicks - ticks
+			warnMsg := fmt.Sprintf("%s\n\nClose the tab within %d ticks or the browser window will be closed.", activity.Domain, remaining)
+			_ = s.notifier.ShowNotification("Parental Control", warnMsg)
+			_ = s.logger.LogEvent(logger.LogEntry{
+				Timestamp: time.Now(),
+				EventType: logger.EventWarning,
+				URL:       activity.URL,
+				Browser:   activity.Browser,
+				Message:   fmt.Sprintf("Warning: site %s will be blocked in %d ticks", activity.Domain, remaining),
+			})
+		}
+	}
+
+	// Очищаем счётчики для сайтов которые больше не открыты.
+	activeDomains := make(map[string]bool)
+	for _, a := range browserActivities {
+		if !a.IsAllowed {
+			activeDomains[a.Domain] = true
+		}
+	}
+	for domain := range s.siteWarningTicks {
+		if !activeDomains[domain] {
+			delete(s.siteWarningTicks, domain)
+		}
 	}
 }
 
@@ -593,14 +734,32 @@ func (s *Service) checkWarnings(now time.Time, schedState scheduler.ScheduleStat
 		}
 	}
 
-	// Warn about sleep time approaching.
+	// Warn about sleep time approaching — only at 15, 5 and 1 minute marks.
 	if shouldWarn, minutesLeft := s.scheduler.ShouldWarnSleep(now); shouldWarn {
-		_ = s.sleepManager.WarnUpcoming(minutesLeft)
-		_ = s.logger.LogEvent(logger.LogEntry{
-			Timestamp: now,
-			EventType: logger.EventWarning,
-			Message:   fmt.Sprintf("Sleep time starts in %d min.", minutesLeft),
-		})
+		shouldShow := false
+		switch {
+		case minutesLeft <= 1 && s.lastSleepWarnMinute != 1:
+			shouldShow = true
+			s.lastSleepWarnMinute = 1
+		case minutesLeft <= 5 && minutesLeft > 1 && s.lastSleepWarnMinute != 5:
+			shouldShow = true
+			s.lastSleepWarnMinute = 5
+		case minutesLeft <= 15 && minutesLeft > 5 && s.lastSleepWarnMinute != 15:
+			shouldShow = true
+			s.lastSleepWarnMinute = 15
+		}
+
+		if shouldShow {
+			_ = s.sleepManager.WarnUpcoming(minutesLeft)
+			_ = s.logger.LogEvent(logger.LogEntry{
+				Timestamp: now,
+				EventType: logger.EventWarning,
+				Message:   fmt.Sprintf("Sleep time starts in %d min.", minutesLeft),
+			})
+		}
+	} else {
+		// Сбрасываем когда не в зоне предупреждения.
+		s.lastSleepWarnMinute = -1
 	}
 }
 
@@ -608,6 +767,8 @@ func (s *Service) checkWarnings(now time.Time, schedState scheduler.ScheduleStat
 func (s *Service) saveState(now time.Time) {
 	st := &state.ServiceState{
 		EntertainmentSeconds: s.entertainmentSeconds,
+		BonusSeconds:         s.bonusSeconds,
+		ComputerSeconds:      s.computerSeconds,
 		LastTickTime:         now,
 	}
 
@@ -615,6 +776,17 @@ func (s *Service) saveState(now time.Time) {
 		st.WindowStart = todayTime(now, s.currentWindowStart)
 		st.WindowEnd = todayTime(now, s.currentWindowEnd)
 	}
+
+	// Сохраняем переопределение сна.
+	s.pauseMu.Lock()
+	if s.sleepOverride != nil {
+		st.SleepOverrideDate = s.sleepOverride.Date
+		st.SleepOverrideStart = s.sleepOverride.NewStart
+		st.SleepOverrideEnd = s.sleepOverride.NewEnd
+	}
+	st.ServiceMode = s.serviceMode
+	st.ModeUntil = s.modeUntil
+	s.pauseMu.Unlock()
 
 	if err := s.stateManager.Save(st); err != nil {
 		log.Printf("[service] failed to save state: %v", err)
@@ -655,15 +827,33 @@ func (s *Service) CurrentStatus() httplog.StatusResponse {
 		modeName = "unknown"
 	}
 
+	svcMode := s.GetServiceMode()
+
 	resp := httplog.StatusResponse{
 		Mode:                 modeName,
+		ServiceMode:          svcMode,
+		DayType:              string(schedState.DayType),
+		HolidayName:          schedState.HolidayName,
 		EntertainmentMinutes: s.entertainmentSeconds / 60,
 		LimitMinutes:         schedState.LimitMinutes,
+		BonusMinutes:         s.bonusSeconds / 60,
+		ComputerMinutes:      s.computerSeconds / 60,
 		ActiveProcesses:      []string{},
 	}
 
+	// Computer time limit from config.
+	cfgCur := s.configManager.Current()
+	if cfgCur != nil && cfgCur.Schedule.TotalComputerMinutes > 0 {
+		resp.ComputerLimitMinutes = cfgCur.Schedule.TotalComputerMinutes
+	}
+
 	if schedState.LimitMinutes > 0 {
-		remaining := schedState.LimitMinutes - s.entertainmentSeconds/60
+		effectiveLimit := schedState.LimitMinutes + s.bonusSeconds/60
+		if effectiveLimit < 0 {
+			effectiveLimit = 0
+		}
+		resp.LimitMinutes = effectiveLimit
+		remaining := effectiveLimit - s.entertainmentSeconds/60
 		if remaining < 0 {
 			remaining = 0
 		}
@@ -675,13 +865,40 @@ func (s *Service) CurrentStatus() httplog.StatusResponse {
 		resp.ActiveWindow = &w
 	}
 
-	// Информация о паузе.
+	// Информация о паузе/режиме.
 	s.pauseMu.Lock()
-	if !s.pauseUntil.IsZero() && time.Now().Before(s.pauseUntil) {
+	if svcMode != "normal" {
 		resp.Paused = true
-		resp.PauseUntil = s.pauseUntil.Format(time.RFC3339)
+		if !s.modeUntil.IsZero() && time.Now().Before(s.modeUntil) {
+			resp.PauseUntil = s.modeUntil.Format(time.RFC3339)
+		}
+	}
+	// Информация о сне.
+	if s.sleepOverride != nil && s.sleepOverride.Date == now.Format("2006-01-02") {
+		resp.SleepOverride = s.sleepOverride.NewStart + "-" + s.sleepOverride.NewEnd
 	}
 	s.pauseMu.Unlock()
+
+	// Расписание сна на сегодня из конфига.
+	cfg := s.configManager.Current()
+	if cfg != nil {
+		today := strings.ToLower(now.Weekday().String())
+		sleepTimes := cfg.Schedule.SleepTimes
+		if schedState.DayType == scheduler.DayTypeHoliday && len(cfg.Schedule.HolidaySleepTimes) > 0 {
+			sleepTimes = cfg.Schedule.HolidaySleepTimes
+		}
+		for _, st := range sleepTimes {
+			for _, d := range st.Days {
+				if strings.ToLower(d) == today {
+					resp.SleepWindow = st.Start + "-" + st.End
+					break
+				}
+			}
+			if resp.SleepWindow != "" {
+				break
+			}
+		}
+	}
 
 	return resp
 }
@@ -690,18 +907,112 @@ func (s *Service) CurrentStatus() httplog.StatusResponse {
 func (s *Service) IsPaused() bool {
 	s.pauseMu.Lock()
 	defer s.pauseMu.Unlock()
-	if s.pauseUntil.IsZero() {
+
+	// Проверяем истечение режима по времени.
+	if !s.modeUntil.IsZero() && time.Now().After(s.modeUntil) {
+		s.serviceMode = "normal"
+		s.modeUntil = time.Time{}
+		s.pauseUntil = time.Time{}
 		return false
 	}
-	if time.Now().After(s.pauseUntil) {
-		s.pauseUntil = time.Time{} // пауза истекла
-		return false
+
+	return s.serviceMode == "filter_paused" || s.serviceMode == "unrestricted"
+}
+
+// GetServiceMode возвращает текущий режим работы сервиса.
+func (s *Service) GetServiceMode() string {
+	s.pauseMu.Lock()
+	defer s.pauseMu.Unlock()
+
+	// Проверяем истечение режима.
+	if !s.modeUntil.IsZero() && time.Now().After(s.modeUntil) {
+		s.serviceMode = "normal"
+		s.modeUntil = time.Time{}
+		s.pauseUntil = time.Time{}
 	}
-	return true
+
+	return s.serviceMode
+}
+
+// IsEntertainmentPaused возвращает true если развлечения приостановлены.
+func (s *Service) IsEntertainmentPaused() bool {
+	return s.GetServiceMode() == "entertainment_paused"
+}
+
+// IsLearningMode возвращает true если сервис в режиме обучения.
+func (s *Service) IsLearningMode() bool {
+	return s.GetServiceMode() == "learning"
+}
+
+// SetServiceMode устанавливает режим работы сервиса.
+func (s *Service) SetServiceMode(password, mode string, minutes int) (bool, string) {
+	if s.passwordHash == "" {
+		return false, "Password not configured"
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(s.passwordHash), []byte(password)); err != nil {
+		return false, "Wrong password"
+	}
+
+	switch mode {
+	case "normal", "filter_paused", "entertainment_paused", "learning", "unrestricted":
+	default:
+		return false, "Invalid mode"
+	}
+
+	s.pauseMu.Lock()
+	oldMode := s.serviceMode
+	s.serviceMode = mode
+	if minutes > 0 {
+		s.modeUntil = time.Now().Add(time.Duration(minutes) * time.Minute)
+		// Для обратной совместимости с filter_paused.
+		if mode == "filter_paused" {
+			s.pauseUntil = s.modeUntil
+		}
+	} else {
+		s.modeUntil = time.Time{}
+		if mode == "filter_paused" {
+			// Бессрочная пауза фильтрации — ставим далёкое время.
+			s.pauseUntil = time.Now().Add(24 * time.Hour)
+		}
+	}
+	if mode == "normal" {
+		s.pauseUntil = time.Time{}
+		s.modeUntil = time.Time{}
+	}
+	s.pauseMu.Unlock()
+
+	msg := fmt.Sprintf("Mode set to %s", mode)
+	if minutes > 0 {
+		msg = fmt.Sprintf("Mode set to %s for %d min.", mode, minutes)
+	}
+	_ = s.logger.LogEvent(logger.LogEntry{
+		Timestamp: time.Now(),
+		EventType: logger.EventInfo,
+		Message:   msg,
+	})
+
+	// Управление learning collector.
+	if mode == "learning" && oldMode != "learning" {
+		s.learningCollector.Start()
+	} else if mode != "learning" && oldMode == "learning" {
+		s.learningCollector.Stop()
+	}
+
+	return true, msg
 }
 
 // Pause ставит паузу на minutes минут, если пароль верный.
 func (s *Service) Pause(password string, minutes int) (bool, string) {
+	return s.SetServiceMode(password, "filter_paused", minutes)
+}
+
+// Unpause снимает любой режим, возвращая в normal.
+func (s *Service) Unpause(password string) (bool, string) {
+	return s.SetServiceMode(password, "normal", 0)
+}
+
+// AddUsage добавляет использованное время развлечений (играл на другом компьютере).
+func (s *Service) AddUsage(password string, minutes int, reason string) (bool, string) {
 	if s.passwordHash == "" {
 		return false, "Password not configured"
 	}
@@ -712,37 +1023,89 @@ func (s *Service) Pause(password string, minutes int) (bool, string) {
 		return false, "Allowed range: 1 to 480 minutes"
 	}
 
-	s.pauseMu.Lock()
-	s.pauseUntil = time.Now().Add(time.Duration(minutes) * time.Minute)
-	s.pauseMu.Unlock()
+	s.entertainmentSeconds += minutes * 60
 
+	msg := fmt.Sprintf("Manual usage added: %d min.", minutes)
+	if reason != "" {
+		msg += " Reason: " + reason
+	}
 	_ = s.logger.LogEvent(logger.LogEntry{
 		Timestamp: time.Now(),
 		EventType: logger.EventInfo,
-		Message:   fmt.Sprintf("Pause set for %d min.", minutes),
+		Message:   msg,
 	})
-	return true, fmt.Sprintf("Paused for %d min.", minutes)
+	return true, msg
 }
 
-// Unpause снимает паузу, если пароль верный.
-func (s *Service) Unpause(password string) (bool, string) {
+// AdjustBonus добавляет или убирает бонусное время развлечений.
+func (s *Service) AdjustBonus(password string, minutes int, reason string) (bool, string) {
 	if s.passwordHash == "" {
 		return false, "Password not configured"
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(s.passwordHash), []byte(password)); err != nil {
 		return false, "Wrong password"
 	}
+	if minutes == 0 {
+		return false, "Minutes cannot be zero"
+	}
 
 	s.pauseMu.Lock()
-	s.pauseUntil = time.Time{}
+	s.bonusSeconds += minutes * 60
 	s.pauseMu.Unlock()
 
+	action := "added"
+	if minutes < 0 {
+		action = "removed"
+	}
+	msg := fmt.Sprintf("Bonus time %s: %+d min. Total bonus: %+d min.", action, minutes, s.bonusSeconds/60)
+	if reason != "" {
+		msg += " Reason: " + reason
+	}
 	_ = s.logger.LogEvent(logger.LogEntry{
 		Timestamp: time.Now(),
 		EventType: logger.EventInfo,
-		Message:   "Pause removed",
+		Message:   msg,
 	})
-	return true, "Pause removed"
+	return true, msg
+}
+
+// AdjustSleep изменяет время сна на сегодня.
+func (s *Service) AdjustSleep(password string, newStart, newEnd, reason string) (bool, string) {
+	if s.passwordHash == "" {
+		return false, "Password not configured"
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(s.passwordHash), []byte(password)); err != nil {
+		return false, "Wrong password"
+	}
+	if newStart == "" && newEnd == "" {
+		return false, "At least one of start or end must be specified"
+	}
+
+	today := time.Now().Format("2006-01-02")
+	s.pauseMu.Lock()
+	s.sleepOverride = &sleepOverrideData{
+		Date:     today,
+		NewStart: newStart,
+		NewEnd:   newEnd,
+	}
+	s.pauseMu.Unlock()
+
+	msg := fmt.Sprintf("Sleep time adjusted for %s.", today)
+	if newStart != "" {
+		msg += fmt.Sprintf(" Start: %s.", newStart)
+	}
+	if newEnd != "" {
+		msg += fmt.Sprintf(" End: %s.", newEnd)
+	}
+	if reason != "" {
+		msg += " Reason: " + reason
+	}
+	_ = s.logger.LogEvent(logger.LogEntry{
+		Timestamp: time.Now(),
+		EventType: logger.EventInfo,
+		Message:   msg,
+	})
+	return true, msg
 }
 
 // ReloadConfig implements httplog.ConfigReloader. Forces immediate config reload.
@@ -843,6 +1206,62 @@ func (s *Service) ChangeConfigURL(password, newURL string) (bool, string) {
 	return true, "Config URL changed"
 }
 
+// QueueNotification добавляет уведомление в очередь для tray.
+func (s *Service) QueueNotification(title, message string) {
+	s.notifMu.Lock()
+	s.notifQueue = append(s.notifQueue, httplog.Notification{Title: title, Message: message})
+	s.notifMu.Unlock()
+}
+
+// DrainNotifications возвращает и очищает очередь уведомлений.
+func (s *Service) DrainNotifications() []httplog.Notification {
+	s.notifMu.Lock()
+	defer s.notifMu.Unlock()
+	if len(s.notifQueue) == 0 {
+		return nil
+	}
+	result := s.notifQueue
+	s.notifQueue = nil
+	return result
+}
+
+// GetLearningCollector возвращает learning collector для HTTP API.
+func (s *Service) GetLearningCollector() *learning.Collector {
+	return s.learningCollector
+}
+
+// GetCurrentReport implements httplog.LearningProvider.
+func (s *Service) GetCurrentReport() interface{} {
+	if s.learningCollector == nil {
+		return nil
+	}
+	return s.learningCollector.GetCurrentReport()
+}
+
+// ListReports implements httplog.LearningProvider.
+func (s *Service) ListReports() []string {
+	if s.learningCollector == nil {
+		return nil
+	}
+	return s.learningCollector.ListReports()
+}
+
+// ReadReport implements httplog.LearningProvider.
+func (s *Service) ReadReport(name string) ([]byte, error) {
+	if s.learningCollector == nil {
+		return nil, fmt.Errorf("not available")
+	}
+	return s.learningCollector.ReadReport(name)
+}
+
+// ClearReports implements httplog.LearningProvider.
+func (s *Service) ClearReports() error {
+	if s.learningCollector == nil {
+		return fmt.Errorf("not available")
+	}
+	return s.learningCollector.ClearReports()
+}
+
 // GetConfigURL implements httplog.ConfigURLChanger.
 func (s *Service) GetConfigURL() string {
 	settings, err := config.LoadSettings(s.dataDir)
@@ -887,7 +1306,25 @@ func (s *Service) ReceiveBrowserURLs(urls []httplog.BrowserURLEntry) ([]uintptr,
 	s.browserURLsMu.Unlock()
 
 	// Определяем, нужно ли блокировать restricted сайты прямо сейчас.
-	// Если пауза активна — не блокируем ничего.
+	// Если пауза активна или режим обучения — не блокируем ничего.
+	// В режиме обучения логируем сайты.
+	if s.IsLearningMode() {
+		cfg := s.configManager.Current()
+		for _, u := range urls {
+			// Не логируем системные сайты (localhost и т.д.).
+			if cfg != nil && browser.IsSystemSite(u.URL, cfg.AllowedSites.Sites) {
+				continue
+			}
+			_ = s.logger.LogEvent(logger.LogEntry{
+				Timestamp: time.Now(),
+				EventType: logger.EventInfo,
+				URL:       u.URL,
+				Browser:   u.Browser,
+				Message:   fmt.Sprintf("Learning: site visited %s (%s)", u.URL, u.Browser),
+			})
+		}
+		return nil, ""
+	}
 	if s.IsPaused() {
 		return nil, ""
 	}

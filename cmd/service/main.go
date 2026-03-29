@@ -217,6 +217,9 @@ func initService() (*service.Service, *logger.Logger, error) {
 		dataDir,
 	)
 
+	// Подключаем очередь уведомлений: notifier → service → tray (через HTTP).
+	notifier.queue = svcInstance.QueueNotification
+
 	// Set the service as the status provider for the HTTP server.
 	httpSrv.SetStatusProvider(svcInstance)
 	httpSrv.SetConfigProvider(svcInstance)
@@ -226,6 +229,8 @@ func initService() (*service.Service, *logger.Logger, error) {
 	httpSrv.SetConfigReloader(svcInstance)
 	httpSrv.SetPasswordChanger(svcInstance)
 	httpSrv.SetConfigURLChanger(svcInstance)
+	httpSrv.SetLearningProvider(svcInstance)
+	httpSrv.SetAdjustmentProvider(svcInstance)
 	httpSrv.SetFileLogProvider(fullLog)
 
 	return svcInstance, lgr, nil

@@ -40,15 +40,53 @@ var (
 	pPostQuitMessage            = user32w.NewProc("PostQuitMessage")
 	pSendMessageW               = user32w.NewProc("SendMessageW")
 	pSetFocus                   = user32w.NewProc("SetFocus")
+	pSetForegroundWindow        = user32w.NewProc("SetForegroundWindow")
 	pIsDialogMessageW           = user32w.NewProc("IsDialogMessageW")
 	pShowWindow                 = user32w.NewProc("ShowWindow")
 	pUpdateWindow               = user32w.NewProc("UpdateWindow")
 	pGetSystemMetrics           = user32w.NewProc("GetSystemMetrics")
 	pSetWindowPos               = user32w.NewProc("SetWindowPos")
+	pCreateIconFromResourceEx   = user32w.NewProc("CreateIconFromResourceEx")
+	pGetDpiForSystem            = user32w.NewProc("GetDpiForSystem")
 	pCreateFontW                = gdi32w.NewProc("CreateFontW")
 )
 
 const mutexName = "Global\\ParentalControlTray_SingleInstance"
+
+// dpiScale возвращает масштабированное значение с учётом DPI.
+func dpiScale(val int) int {
+	dpi, _, _ := pGetDpiForSystem.Call()
+	if dpi == 0 {
+		dpi = 96
+	}
+	return val * int(dpi) / 96
+}
+
+// setWindowIcon устанавливает иконку песочных часов на окно.
+func setWindowIcon(hwnd uintptr) {
+	icoData := generateHourglassICO()
+	if len(icoData) > 22 {
+		bmpData := icoData[22:]
+		hIcon, _, _ := pCreateIconFromResourceEx.Call(
+			uintptr(unsafe.Pointer(&bmpData[0])), uintptr(len(bmpData)),
+			1, 0x00030000, 16, 16, 0)
+		if hIcon != 0 {
+			pSendMessageW.Call(hwnd, 0x0080, 0, hIcon) // WM_SETICON ICON_SMALL
+			pSendMessageW.Call(hwnd, 0x0080, 1, hIcon) // WM_SETICON ICON_BIG
+		}
+	}
+}
+
+// createScaledFont создаёт шрифт Segoe UI масштабированный по DPI.
+func createScaledFont() uintptr {
+	fontName, _ := syscall.UTF16PtrFromString("Segoe UI")
+	fontH := -int(dpiScale(16))
+	hFont, _, _ := pCreateFontW.Call(
+		uintptr(uint32(fontH)),
+		0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0,
+		uintptr(unsafe.Pointer(fontName)))
+	return hFont
+}
 
 // ensureSingleInstance убивает предыдущий экземпляр tray.exe (если есть).
 func ensureSingleInstance() {
@@ -68,9 +106,142 @@ func killOtherTrayInstances() {
 
 // showMessageBox shows a Windows MessageBox.
 func showMessageBox(title, text string) {
-	titlePtr, _ := syscall.UTF16PtrFromString(title)
-	textPtr, _ := syscall.UTF16PtrFromString(text)
-	pMessageBoxW.Call(0, uintptr(unsafe.Pointer(textPtr)), uintptr(unsafe.Pointer(titlePtr)), 0x00000040)
+	go func() {
+		runtime.LockOSThread()
+
+		classCounter++
+		clsName := fmt.Sprintf("PCMsgBox_%d", classCounter)
+		className, _ := syscall.UTF16PtrFromString(clsName)
+
+		var hMainWnd uintptr
+
+		wndProc := syscall.NewCallback(func(hwnd, msg, wParam, lParam uintptr) uintptr {
+			switch msg {
+			case wmCommand:
+				id := wParam & 0xFFFF
+				if id == idOK {
+					pDestroyWindow.Call(hMainWnd)
+					return 0
+				}
+			case wmClose:
+				pDestroyWindow.Call(hMainWnd)
+				return 0
+			case wmDestroy:
+				pPostQuitMessage.Call(0)
+				return 0
+			}
+			ret, _, _ := pDefWindowProcW.Call(hwnd, msg, wParam, lParam)
+			return ret
+		})
+
+		type WNDCLASSEX struct {
+			Size       uint32
+			Style      uint32
+			WndProc    uintptr
+			ClsExtra   int32
+			WndExtra   int32
+			Instance   uintptr
+			Icon       uintptr
+			Cursor     uintptr
+			Background uintptr
+			MenuName   *uint16
+			ClassName  *uint16
+			IconSm     uintptr
+		}
+
+		wc := WNDCLASSEX{
+			Size:       uint32(unsafe.Sizeof(WNDCLASSEX{})),
+			WndProc:    wndProc,
+			Background: 16,
+			ClassName:  className,
+		}
+		pRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
+
+		winW := dpiScale(340)
+		// Считаем визуальные строки с учётом переноса.
+		charsPerLine := 38 // примерно символов в строке при ширине 340
+		lineCount := 0
+		for _, line := range strings.Split(text, "\n") {
+			if len(line) == 0 {
+				lineCount++
+			} else {
+				lineCount += (len([]rune(line)) + charsPerLine - 1) / charsPerLine
+			}
+		}
+		winH := dpiScale(100) + lineCount*dpiScale(22)
+		if winH < dpiScale(160) {
+			winH = dpiScale(160)
+		}
+
+		titlePtr, _ := syscall.UTF16PtrFromString(title)
+		hMainWnd, _, _ = pCreateWindowExW.Call(
+			wsExTopmost,
+			uintptr(unsafe.Pointer(className)),
+			uintptr(unsafe.Pointer(titlePtr)),
+			wsOverlapped|wsCaption|wsSysMenu,
+			uintptr(cwUseDefault), uintptr(cwUseDefault), uintptr(winW), uintptr(winH),
+			0, 0, 0, 0)
+
+		setWindowIcon(hMainWnd)
+
+		hFont := createScaledFont()
+
+		labelH := lineCount * dpiScale(22)
+		staticClass, _ := syscall.UTF16PtrFromString("STATIC")
+		textUTF, _ := syscall.UTF16PtrFromString(text)
+		hLabel, _, _ := pCreateWindowExW.Call(0,
+			uintptr(unsafe.Pointer(staticClass)),
+			uintptr(unsafe.Pointer(textUTF)),
+			wsChild|wsVisible|ssLeft,
+			uintptr(dpiScale(14)), uintptr(dpiScale(10)), uintptr(winW-dpiScale(30)), uintptr(labelH),
+			hMainWnd, 0, 0, 0)
+
+		btnY := dpiScale(18) + labelH
+		btnClass, _ := syscall.UTF16PtrFromString("BUTTON")
+		okText, _ := syscall.UTF16PtrFromString("OK")
+		hOK, _, _ := pCreateWindowExW.Call(0,
+			uintptr(unsafe.Pointer(btnClass)),
+			uintptr(unsafe.Pointer(okText)),
+			wsChild|wsVisible|wsTabStop|bsDefPushButton,
+			uintptr(winW/2-dpiScale(40)), uintptr(btnY), uintptr(dpiScale(80)), uintptr(dpiScale(26)),
+			hMainWnd, idOK, 0, 0)
+
+		if hFont != 0 {
+			pSendMessageW.Call(hLabel, wmSetFont, hFont, 1)
+			pSendMessageW.Call(hOK, wmSetFont, hFont, 1)
+		}
+
+		screenW, _, _ := pGetSystemMetrics.Call(0)
+		screenH, _, _ := pGetSystemMetrics.Call(1)
+		pSetWindowPos.Call(hMainWnd, 0,
+			(screenW-uintptr(winW))/2, (screenH-uintptr(winH))/2, 0, 0, 0x0001|0x0004)
+
+		pShowWindow.Call(hMainWnd, swShow)
+		pUpdateWindow.Call(hMainWnd)
+		pSetForegroundWindow.Call(hMainWnd)
+
+		type MSG struct {
+			Hwnd    uintptr
+			Message uint32
+			WParam  uintptr
+			LParam  uintptr
+			Time    uint32
+			Pt      [2]int32
+		}
+		var msg MSG
+		for {
+			ret, _, _ := pGetMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
+			if ret == 0 || ret == ^uintptr(0) {
+				break
+			}
+			isDlg, _, _ := pIsDialogMessageW.Call(hMainWnd, uintptr(unsafe.Pointer(&msg)))
+			if isDlg != 0 {
+				continue
+			}
+			pTranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
+			pDispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
+		}
+	}()
 }
 
 // openFileInViewer opens a file with the default viewer.
@@ -96,11 +267,15 @@ func closeWindow(hwnd uintptr) {
 // --- Native Win32 Input Dialog ---
 
 func inputBox(prompt, title string) string {
-	return win32InputBox(prompt, title, false)
+	return win32InputBox(prompt, title, false, "")
+}
+
+func inputBoxWithDefault(prompt, title, defaultVal string) string {
+	return win32InputBox(prompt, title, false, defaultVal)
 }
 
 func inputBoxPassword(prompt, title string) string {
-	return win32InputBox(prompt, title, true)
+	return win32InputBox(prompt, title, true, "")
 }
 
 const (
@@ -127,7 +302,7 @@ const (
 	cwUseDefault    = 0x80000000
 )
 
-func win32InputBox(prompt, title string, isPassword bool) string {
+func win32InputBox(prompt, title string, isPassword bool, defaultVal string) string {
 	var result string
 	done := make(chan struct{})
 
@@ -138,12 +313,8 @@ func win32InputBox(prompt, title string, isPassword bool) string {
 		var hEdit uintptr
 		var hMainWnd uintptr
 
-		// Шрифт Segoe UI 14pt.
-		fontName, _ := syscall.UTF16PtrFromString("Segoe UI")
-		hFont, _, _ := pCreateFontW.Call(
-			uintptr(uint32(0xFFFFFFEA)), // -22 logical units ≈ 14pt
-			0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0,
-			uintptr(unsafe.Pointer(fontName)))
+		// Шрифт.
+		hFont := createScaledFont()
 
 		// Уникальное имя класса (чтобы не конфликтовать при повторном вызове).
 		classCounter++
@@ -211,8 +382,15 @@ func win32InputBox(prompt, title string, isPassword bool) string {
 		}
 		pRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 
-		// Размер окна: 420x200 (с учётом заголовка ~30px и рамки).
-		const winW, winH = 420, 200
+		// Размер окна — адаптивный по количеству строк prompt.
+		promptLines := 1
+		for _, c := range prompt {
+			if c == '\n' {
+				promptLines++
+			}
+		}
+		inputWinW := dpiScale(340)
+		inputWinH := dpiScale(150) + (promptLines-1)*dpiScale(22)
 
 		titlePtr, _ := syscall.UTF16PtrFromString(title)
 		hMainWnd, _, _ = pCreateWindowExW.Call(
@@ -220,20 +398,24 @@ func win32InputBox(prompt, title string, isPassword bool) string {
 			uintptr(unsafe.Pointer(className)),
 			uintptr(unsafe.Pointer(titlePtr)),
 			wsOverlapped|wsCaption|wsSysMenu,
-			uintptr(cwUseDefault), uintptr(cwUseDefault), winW, winH,
+			uintptr(cwUseDefault), uintptr(cwUseDefault), uintptr(inputWinW), uintptr(inputWinH),
 			0, 0, 0, 0)
 
+		setWindowIcon(hMainWnd)
+
 		// Label.
+		labelH := dpiScale(22) * promptLines
 		staticClass, _ := syscall.UTF16PtrFromString("STATIC")
 		promptPtr, _ := syscall.UTF16PtrFromString(prompt)
 		hLabel, _, _ := pCreateWindowExW.Call(0,
 			uintptr(unsafe.Pointer(staticClass)),
 			uintptr(unsafe.Pointer(promptPtr)),
 			wsChild|wsVisible|ssLeft,
-			20, 15, 370, 24,
+			uintptr(dpiScale(14)), uintptr(dpiScale(10)), uintptr(inputWinW-dpiScale(30)), uintptr(labelH),
 			hMainWnd, 0, 0, 0)
 
 		// Edit.
+		editY := dpiScale(14) + labelH
 		editClass, _ := syscall.UTF16PtrFromString("EDIT")
 		editStyle := uintptr(wsChild | wsVisible | wsBorder | wsTabStop | esAutoHScroll)
 		if isPassword {
@@ -242,17 +424,25 @@ func win32InputBox(prompt, title string, isPassword bool) string {
 		hEdit, _, _ = pCreateWindowExW.Call(0,
 			uintptr(unsafe.Pointer(editClass)), 0,
 			editStyle,
-			20, 48, 370, 28,
+			uintptr(dpiScale(14)), uintptr(editY), uintptr(inputWinW-dpiScale(30)), uintptr(dpiScale(24)),
 			hMainWnd, idEdit, 0, 0)
 
+		// Предзаполнение поля ввода.
+		if defaultVal != "" {
+			defPtr, _ := syscall.UTF16PtrFromString(defaultVal)
+			pSendMessageW.Call(hEdit, 0x000C, 0, uintptr(unsafe.Pointer(defPtr)))
+		}
+
 		// OK button.
+		btnY := editY + dpiScale(34)
+		btnW := dpiScale(80)
 		btnClass, _ := syscall.UTF16PtrFromString("BUTTON")
 		okText, _ := syscall.UTF16PtrFromString("OK")
 		hOK, _, _ := pCreateWindowExW.Call(0,
 			uintptr(unsafe.Pointer(btnClass)),
 			uintptr(unsafe.Pointer(okText)),
 			wsChild|wsVisible|wsTabStop|bsDefPushButton,
-			200, 95, 90, 32,
+			uintptr(inputWinW/2-btnW-dpiScale(4)), uintptr(btnY), uintptr(btnW), uintptr(dpiScale(26)),
 			hMainWnd, idOK, 0, 0)
 
 		// Cancel button.
@@ -261,7 +451,7 @@ func win32InputBox(prompt, title string, isPassword bool) string {
 			uintptr(unsafe.Pointer(btnClass)),
 			uintptr(unsafe.Pointer(cancelBtnText)),
 			wsChild|wsVisible|wsTabStop,
-			300, 95, 90, 32,
+			uintptr(inputWinW/2+dpiScale(4)), uintptr(btnY), uintptr(btnW), uintptr(dpiScale(26)),
 			hMainWnd, idCancel, 0, 0)
 
 		// Шрифт на все контролы.
@@ -275,11 +465,12 @@ func win32InputBox(prompt, title string, isPassword bool) string {
 		screenW, _, _ := pGetSystemMetrics.Call(0)
 		screenH, _, _ := pGetSystemMetrics.Call(1)
 		pSetWindowPos.Call(hMainWnd, 0,
-			(screenW-winW)/2, (screenH-winH)/2, 0, 0,
-			0x0001|0x0004) // SWP_NOSIZE | SWP_NOZORDER
+			(screenW-uintptr(inputWinW))/2, (screenH-uintptr(inputWinH))/2, 0, 0,
+			0x0001|0x0004)
 
 		pShowWindow.Call(hMainWnd, swShow)
 		pUpdateWindow.Call(hMainWnd)
+		pSetForegroundWindow.Call(hMainWnd)
 		pSetFocus.Call(hEdit)
 
 		// Message loop с поддержкой Tab и Enter через IsDialogMessage.
@@ -448,8 +639,222 @@ func generatePausedICO() []byte {
 	return ico
 }
 
-// hourglassICO — иконка песочных часов (генерируется при запуске).
+// generateGreenICO creates the hourglass with green tint (filter paused / entertainment allowed).
+func generateGreenICO() []byte {
+	const (
+		w      = 16
+		h      = 16
+		bpp    = 32
+		imgSize = w * h * 4
+	)
+
+	headerSize := 6 + 16
+	bmpHeaderSize := 40
+	totalSize := headerSize + bmpHeaderSize + imgSize
+
+	ico := make([]byte, totalSize)
+
+	putLE16(ico, 0, 0)
+	putLE16(ico, 2, 1)
+	putLE16(ico, 4, 1)
+	ico[6] = byte(w)
+	ico[7] = byte(h)
+	putLE16(ico, 10, 1)
+	putLE16(ico, 12, bpp)
+	putLE32(ico, 14, uint32(bmpHeaderSize+imgSize))
+	putLE32(ico, 18, uint32(headerSize))
+
+	off := headerSize
+	putLE32(ico, off, uint32(bmpHeaderSize))
+	putLE32(ico, off+4, w)
+	putLE32(ico, off+8, h*2)
+	putLE16(ico, off+12, 1)
+	putLE16(ico, off+14, bpp)
+
+	pixOff := headerSize + bmpHeaderSize
+
+	bg := [4]byte{0, 0, 0, 0}
+	frame := [4]byte{80, 160, 80, 255}    // green frame (BGRA)
+	glass := [4]byte{100, 200, 100, 255}   // green glass
+	sand := [4]byte{130, 230, 130, 255}    // light green sand
+
+	pattern := [16][16]byte{
+		{0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0},
+		{0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0},
+		{0, 0, 0, 1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0},
+		{0, 0, 0, 0, 1, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 1, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 0, 1, 3, 3, 1, 0, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 1, 3, 3, 3, 3, 1, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 1, 3, 3, 3, 3, 1, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 0, 1, 3, 3, 1, 0, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 1, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 1, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0},
+		{0, 0, 0, 1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0},
+		{0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0},
+		{0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0},
+	}
+
+	colors := [4][4]byte{bg, frame, glass, sand}
+
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			idx := pattern[y][x]
+			c := colors[idx]
+			p := pixOff + (y*w+x)*4
+			ico[p] = c[0]
+			ico[p+1] = c[1]
+			ico[p+2] = c[2]
+			ico[p+3] = c[3]
+		}
+	}
+
+	return ico
+}
+
+// generateLearningICO creates the hourglass with a green "?" overlay (learning mode).
+func generateLearningICO() []byte {
+	ico := generateHourglassICO()
+
+	const (
+		w      = 16
+		pixOff = 62
+	)
+
+	red := [4]byte{0, 0, 255, 255}       // BGRA bright red
+	dark := [4]byte{0, 0, 160, 255}      // BGRA dark red outline
+
+	// Big "?" covering most of the 16x16 icon (rows 1-14).
+	// Outline (dark red).
+	for _, pt := range [][2]int{
+		{4, 14}, {11, 14},
+		{4, 13}, {11, 13},
+		{3, 12}, {4, 12}, {11, 12}, {12, 12},
+		{3, 11}, {12, 11},
+		{12, 10},
+		{11, 9}, {12, 9},
+		{10, 8}, {11, 8},
+		{8, 7}, {9, 7}, {10, 7},
+		{7, 6}, {8, 6},
+		{7, 5},
+		{7, 3}, {8, 3},
+		{7, 2}, {10, 2},
+		{10, 1},
+	} {
+		x, y := pt[0], pt[1]
+		p := pixOff + (y*w+x)*4
+		ico[p], ico[p+1], ico[p+2], ico[p+3] = dark[0], dark[1], dark[2], dark[3]
+	}
+
+	// Fill (bright red).
+	for _, pt := range [][2]int{
+		// Top arc.
+		{5, 14}, {6, 14}, {7, 14}, {8, 14}, {9, 14}, {10, 14},
+		{5, 13}, {6, 13}, {7, 13}, {8, 13}, {9, 13}, {10, 13},
+		{5, 12}, {6, 12}, {7, 12}, {8, 12}, {9, 12}, {10, 12},
+		{4, 11}, {5, 11}, {6, 11}, {7, 11}, {8, 11}, {9, 11}, {10, 11}, {11, 11},
+		// Right side going down.
+		{10, 10}, {11, 10},
+		{9, 9}, {10, 9},
+		// Stem.
+		{8, 8}, {9, 8},
+		{8, 7}, {9, 7},
+		{8, 6},
+		{8, 5},
+		// Dot.
+		{8, 2}, {9, 2},
+		{8, 1}, {9, 1},
+	} {
+		x, y := pt[0], pt[1]
+		p := pixOff + (y*w+x)*4
+		ico[p], ico[p+1], ico[p+2], ico[p+3] = red[0], red[1], red[2], red[3]
+	}
+
+	return ico
+}
+
+// generateUnrestrictedICO creates orange hourglass (unrestricted mode).
+func generateUnrestrictedICO() []byte {
+	const (
+		w       = 16
+		h       = 16
+		bpp     = 32
+		imgSize = w * h * 4
+	)
+
+	headerSize := 6 + 16
+	bmpHeaderSize := 40
+	totalSize := headerSize + bmpHeaderSize + imgSize
+	ico := make([]byte, totalSize)
+
+	putLE16(ico, 0, 0)
+	putLE16(ico, 2, 1)
+	putLE16(ico, 4, 1)
+	ico[6] = byte(w)
+	ico[7] = byte(h)
+	putLE16(ico, 10, 1)
+	putLE16(ico, 12, bpp)
+	putLE32(ico, 14, uint32(bmpHeaderSize+imgSize))
+	putLE32(ico, 18, uint32(headerSize))
+
+	off := headerSize
+	putLE32(ico, off, uint32(bmpHeaderSize))
+	putLE32(ico, off+4, w)
+	putLE32(ico, off+8, h*2)
+	putLE16(ico, off+12, 1)
+	putLE16(ico, off+14, bpp)
+
+	pixOff := headerSize + bmpHeaderSize
+
+	bg := [4]byte{0, 0, 0, 0}
+	frame := [4]byte{60, 120, 200, 255}    // orange frame (BGRA)
+	glass := [4]byte{80, 160, 240, 255}    // orange glass
+	sand := [4]byte{100, 190, 255, 255}    // light orange sand
+
+	pattern := [16][16]byte{
+		{0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0},
+		{0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0},
+		{0, 0, 0, 1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0},
+		{0, 0, 0, 0, 1, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 1, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 0, 1, 3, 3, 1, 0, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 1, 3, 3, 3, 3, 1, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 1, 3, 3, 3, 3, 1, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 0, 1, 3, 3, 1, 0, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 1, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 1, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0},
+		{0, 0, 0, 1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0},
+		{0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0},
+		{0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0},
+	}
+
+	colors := [4][4]byte{bg, frame, glass, sand}
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			idx := pattern[y][x]
+			c := colors[idx]
+			p := pixOff + (y*w+x)*4
+			ico[p], ico[p+1], ico[p+2], ico[p+3] = c[0], c[1], c[2], c[3]
+		}
+	}
+	return ico
+}
+
+// hourglassICO — иконка песочных часов (обычный режим).
 var hourglassICO = generateHourglassICO()
 
-// hourglassPausedICO — иконка песочных часов с красной полосой (пауза).
+// hourglassPausedICO — иконка песочных часов с красной полосой (пауза развлечений).
 var hourglassPausedICO = generatePausedICO()
+
+// hourglassGreenICO — зелёные песочные часы (развлечения разрешены / фильтрация приостановлена).
+var hourglassGreenICO = generateGreenICO()
+
+// hourglassLearningICO — песочные часы с зелёным вопросительным знаком (режим обучения).
+var hourglassLearningICO = generateLearningICO()
+
+// hourglassUnrestrictedICO — оранжевые песочные часы (режим без ограничений).
+var hourglassUnrestrictedICO = generateUnrestrictedICO()

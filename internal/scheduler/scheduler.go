@@ -27,27 +27,79 @@ func (s *Scheduler) UpdateSchedule(schedule config.ScheduleConfig) {
 
 // CurrentState determines the current mode based on the given time.
 // Priority: sleep time > entertainment window > outside window.
+// If today is a holiday, uses holiday_windows/holiday_sleep_times instead.
 func (s *Scheduler) CurrentState(now time.Time) ScheduleState {
+	dayType := s.determineDayType(now)
+	holidayName := s.holidayName(now)
+
+	// Select windows and sleep times based on day type.
+	var entertainmentWindows []config.TimeWindow
+	var sleepTimes []config.SleepTimeSlot
+
+	if dayType == DayTypeHoliday && len(s.schedule.HolidayWindows) > 0 {
+		entertainmentWindows = s.schedule.HolidayWindows
+	} else {
+		entertainmentWindows = s.schedule.EntertainmentWindows
+	}
+
+	if dayType == DayTypeHoliday && len(s.schedule.HolidaySleepTimes) > 0 {
+		sleepTimes = s.schedule.HolidaySleepTimes
+	} else {
+		sleepTimes = s.schedule.SleepTimes
+	}
+
 	// Highest priority: sleep time.
-	if slot := s.activeSleepSlot(now); slot != nil {
+	if slot := s.activeSleepSlotFrom(now, sleepTimes); slot != nil {
 		return ScheduleState{
-			Mode:      ModeSleepTime,
-			SleepTime: slot,
+			Mode:        ModeSleepTime,
+			DayType:     dayType,
+			HolidayName: holidayName,
+			SleepTime:   slot,
 		}
 	}
 
 	// Check entertainment windows.
-	if tw := s.ActiveWindow(now); tw != nil {
+	if tw := s.activeWindowFrom(now, entertainmentWindows); tw != nil {
 		return ScheduleState{
 			Mode:          ModeInsideWindow,
+			DayType:       dayType,
+			HolidayName:   holidayName,
 			CurrentWindow: tw,
 			LimitMinutes:  tw.LimitMinutes,
 		}
 	}
 
 	return ScheduleState{
-		Mode: ModeOutsideWindow,
+		Mode:        ModeOutsideWindow,
+		DayType:     dayType,
+		HolidayName: holidayName,
 	}
+}
+
+// determineDayType определяет тип дня: праздник, выходной или рабочий.
+func (s *Scheduler) determineDayType(now time.Time) DayType {
+	dateStr := now.Format("2006-01-02")
+	for _, h := range s.schedule.Holidays {
+		if h.Date == dateStr {
+			return DayTypeHoliday
+		}
+	}
+	wd := now.Weekday()
+	if wd == time.Saturday || wd == time.Sunday {
+		return DayTypeWeekend
+	}
+	return DayTypeWorkday
+}
+
+// holidayName возвращает название праздника для текущей даты, или "".
+func (s *Scheduler) holidayName(now time.Time) string {
+	dateStr := now.Format("2006-01-02")
+	for _, h := range s.schedule.Holidays {
+		if h.Date == dateStr {
+			return h.Name
+		}
+	}
+	return ""
 }
 
 // IsSleepTime checks whether the given time falls within any configured sleep time slot.
@@ -57,8 +109,18 @@ func (s *Scheduler) IsSleepTime(now time.Time) bool {
 
 // activeSleepSlot returns the active sleep time slot for the given time, or nil.
 func (s *Scheduler) activeSleepSlot(now time.Time) *config.SleepTimeSlot {
-	for i := range s.schedule.SleepTimes {
-		slot := &s.schedule.SleepTimes[i]
+	// Use holiday sleep times if today is a holiday and they are configured.
+	sleepTimes := s.schedule.SleepTimes
+	if s.determineDayType(now) == DayTypeHoliday && len(s.schedule.HolidaySleepTimes) > 0 {
+		sleepTimes = s.schedule.HolidaySleepTimes
+	}
+	return s.activeSleepSlotFrom(now, sleepTimes)
+}
+
+// activeSleepSlotFrom returns the active sleep time slot from the given list, or nil.
+func (s *Scheduler) activeSleepSlotFrom(now time.Time, slots []config.SleepTimeSlot) *config.SleepTimeSlot {
+	for i := range slots {
+		slot := &slots[i]
 		if s.timeInSleepSlot(now, slot) {
 			return slot
 		}
@@ -101,8 +163,17 @@ func (s *Scheduler) timeInSleepSlot(now time.Time, slot *config.SleepTimeSlot) b
 
 // ActiveWindow returns the currently active entertainment time window, or nil.
 func (s *Scheduler) ActiveWindow(now time.Time) *config.TimeWindow {
-	for i := range s.schedule.EntertainmentWindows {
-		tw := &s.schedule.EntertainmentWindows[i]
+	windows := s.schedule.EntertainmentWindows
+	if s.determineDayType(now) == DayTypeHoliday && len(s.schedule.HolidayWindows) > 0 {
+		windows = s.schedule.HolidayWindows
+	}
+	return s.activeWindowFrom(now, windows)
+}
+
+// activeWindowFrom returns the active entertainment window from the given list, or nil.
+func (s *Scheduler) activeWindowFrom(now time.Time, windows []config.TimeWindow) *config.TimeWindow {
+	for i := range windows {
+		tw := &windows[i]
 		if timeInRange(now, tw.Start, tw.End) && dayMatches(now, tw.Days) {
 			return tw
 		}
@@ -134,8 +205,13 @@ func (s *Scheduler) ShouldWarnSleep(now time.Time) (bool, int) {
 		return false, 0
 	}
 
-	for i := range s.schedule.SleepTimes {
-		slot := &s.schedule.SleepTimes[i]
+	sleepTimes := s.schedule.SleepTimes
+	if s.determineDayType(now) == DayTypeHoliday && len(s.schedule.HolidaySleepTimes) > 0 {
+		sleepTimes = s.schedule.HolidaySleepTimes
+	}
+
+	for i := range sleepTimes {
+		slot := &sleepTimes[i]
 		mins := s.minutesUntilSleep(now, slot)
 		if mins >= 0 && mins <= warningMin {
 			return true, mins

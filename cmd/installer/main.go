@@ -84,7 +84,6 @@ func main() {
 		if *configURL == "" || *password == "" {
 			log.Fatalf("Silent install requires --config-url and --password flags.")
 		}
-		// Хешируем пароль через bcrypt (необратимый хеш).
 		hash, err := bcrypt.GenerateFromPassword([]byte(*password), bcrypt.DefaultCost)
 		if err != nil {
 			log.Fatalf("Failed to hash password: %v", err)
@@ -92,6 +91,14 @@ func main() {
 		settings := &config.ServiceSettings{
 			ConfigURL:    *configURL,
 			PasswordHash: string(hash),
+		}
+		// --clean при install сбрасывает state.json (бонусы, режим, корректировки).
+		if *cleanFlag {
+			statePath := filepath.Join(dataDir, "state.json")
+			_ = resetACL(dataDir)
+			if err := os.Remove(statePath); err == nil {
+				fmt.Println("Cleaned state.json (reset bonuses, mode, adjustments)")
+			}
 		}
 		if err := doInstall(settings); err != nil {
 			log.Fatalf("Install failed: %v", err)

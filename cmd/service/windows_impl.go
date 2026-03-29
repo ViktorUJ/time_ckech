@@ -84,27 +84,20 @@ func (k *windowsProcessKiller) ForceKill(pid uint32) error {
 	return nil
 }
 
-// windowsNotifier implements enforcer.Notifier using Windows toast notifications.
-type windowsNotifier struct{}
+// windowsNotifier implements enforcer.Notifier — складывает уведомления в очередь.
+type windowsNotifier struct {
+	queue func(title, message string)
+}
 
 func newWindowsNotifier() *windowsNotifier {
 	return &windowsNotifier{}
 }
 
 func (n *windowsNotifier) ShowNotification(title, message string) error {
-	// Use PowerShell to display a toast notification.
-	script := fmt.Sprintf(
-		`[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; `+
-			`$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); `+
-			`$textNodes = $template.GetElementsByTagName('text'); `+
-			`$textNodes.Item(0).AppendChild($template.CreateTextNode('%s')) | Out-Null; `+
-			`$textNodes.Item(1).AppendChild($template.CreateTextNode('%s')) | Out-Null; `+
-			`$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('ParentalControlService'); `+
-			`$notifier.Show([Windows.UI.Notifications.ToastNotification]::new($template))`,
-		title, message,
-	)
-	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
-	return cmd.Run()
+	if n.queue != nil {
+		n.queue(title, message)
+	}
+	return nil
 }
 
 // setLowPriority sets the current process priority to BELOW_NORMAL_PRIORITY_CLASS

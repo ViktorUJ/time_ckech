@@ -80,6 +80,11 @@ func IsURLAllowed(rawURL string, allowedSites []config.AllowedSite) bool {
 		return false
 	}
 
+	// Встроенные системные домены — всегда разрешены.
+	if isBuiltinSystemDomain(domain) {
+		return true
+	}
+
 	urlPath := extractPath(rawURL)
 
 	for _, site := range allowedSites {
@@ -100,9 +105,38 @@ func IsURLAllowed(rawURL string, allowedSites []config.AllowedSite) bool {
 				return true
 			}
 		}
+	}
+	return false
+}
 
-		// Paths didn't match for this entry, but continue checking
-		// other entries — there may be a more specific match.
+// IsSystemSite проверяет, является ли URL системным (не считается развлечением).
+func IsSystemSite(rawURL string, allowedSites []config.AllowedSite) bool {
+	domain := ExtractDomain(rawURL)
+	if domain == "" {
+		return false
+	}
+
+	if isBuiltinSystemDomain(domain) {
+		return true
+	}
+
+	for _, site := range allowedSites {
+		allowed := strings.ToLower(site.Domain)
+		if !domainMatches(domain, allowed, site.IncludeSubdomains) {
+			continue
+		}
+		if site.Category == "system" {
+			return true
+		}
+	}
+	return false
+}
+
+// isBuiltinSystemDomain возвращает true для встроенных системных доменов.
+func isBuiltinSystemDomain(domain string) bool {
+	switch domain {
+	case "127.0.0.1", "localhost", "::1", "0.0.0.0":
+		return true
 	}
 	return false
 }
