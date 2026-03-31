@@ -60,6 +60,8 @@ type statusResponse struct {
 	Mode                 string  `json:"mode"`
 	ServiceMode          string  `json:"service_mode"`
 	DayType              string  `json:"day_type"`
+	HolidayName          string  `json:"holiday_name,omitempty"`
+	VacationName         string  `json:"vacation_name,omitempty"`
 	EntertainmentMinutes int     `json:"entertainment_minutes"`
 	LimitMinutes         int     `json:"limit_minutes"`
 	MinutesRemaining     int     `json:"minutes_remaining"`
@@ -67,6 +69,7 @@ type statusResponse struct {
 	ComputerMinutes      int     `json:"computer_minutes"`
 	ComputerLimitMinutes int     `json:"computer_limit_minutes"`
 	ActiveWindow         *string `json:"active_window,omitempty"`
+	NextWindow           string  `json:"next_window,omitempty"`
 	SleepTime            *string `json:"sleep_time,omitempty"`
 	SleepWindow          string  `json:"sleep_window,omitempty"`
 	SleepOverride        string  `json:"sleep_override,omitempty"`
@@ -435,7 +438,13 @@ func formatStatus(s *statusResponse) string {
 	var lines []string
 
 	// Тип дня.
-	lines = append(lines, tr("daytype."+s.DayType))
+	dayLine := tr("daytype." + s.DayType)
+	if s.VacationName != "" {
+		dayLine += ": " + s.VacationName
+	} else if s.HolidayName != "" {
+		dayLine += ": " + s.HolidayName
+	}
+	lines = append(lines, dayLine)
 
 	// Режим сервиса (если не normal).
 	svcMode := s.ServiceMode
@@ -462,7 +471,12 @@ func formatStatus(s *statusResponse) string {
 	case "sleep_time":
 		lines = append(lines, tr("status.sleep"))
 	case "outside_window":
-		lines = append(lines, tr("status.outside"))
+		// Показываем когда откроется окно.
+		if s.NextWindow != "" {
+			lines = append(lines, tr("status.next_window")+": "+s.NextWindow)
+		} else {
+			lines = append(lines, tr("status.outside"))
+		}
 	case "inside_window":
 		spent := s.EntertainmentMinutes
 		limit := s.LimitMinutes

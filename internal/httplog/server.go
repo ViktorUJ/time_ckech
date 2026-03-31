@@ -644,6 +644,15 @@ func (h *HTTPLogServer) handleConfigHTML(w http.ResponseWriter, r *http.Request)
 		SleepWarningBeforeMin   int          `json:"sleep_warning_before_minutes"`
 		FullLogging             bool         `json:"full_logging"`
 		EntertainmentApps       []string     `json:"entertainment_apps"`
+		Vacations               []struct {
+			Name       string       `json:"name,omitempty"`
+			StartDate  string       `json:"start_date"`
+			EndDate    string       `json:"end_date"`
+			Windows    []timeWindow `json:"windows"`
+			SleepTimes []timeWindow `json:"sleep_times,omitempty"`
+			PreDayStart string      `json:"pre_day_start,omitempty"`
+			PreDayEnd   string      `json:"pre_day_end,omitempty"`
+		} `json:"vacations"`
 	}
 	var sched schedWrapper
 	if schedJSON != nil {
@@ -817,6 +826,54 @@ function applyFilter(){
 			}
 			fmt.Fprint(w, `</table>`)
 		}
+
+		// Vacations.
+		if len(sched.Vacations) > 0 {
+			fmt.Fprintf(w, `<h2 style="font-size:0.95rem;color:#74c7ec">🏖 %s (%d)</h2>`, ui.vacations, len(sched.Vacations))
+			for _, v := range sched.Vacations {
+				name := v.Name
+				if name == "" {
+					name = v.StartDate + " — " + v.EndDate
+				}
+				fmt.Fprintf(w, `<div style="background:#313244;border-radius:6px;padding:10px 14px;margin-bottom:8px;border-left:3px solid #74c7ec">`)
+				fmt.Fprintf(w, `<div style="font-weight:600;color:#74c7ec;margin-bottom:6px">%s: %s — %s</div>`, htmlEscape(name), v.StartDate, v.EndDate)
+
+				// Windows.
+				if len(v.Windows) > 0 {
+					fmt.Fprintf(w, `<table style="margin-bottom:4px"><tr><th>%s</th><th>%s</th><th>%s</th></tr>`,
+						ui.colDays, ui.colTimeRange, ui.colLimit)
+					for _, vw := range v.Windows {
+						days := translateDays(vw.Days, lang)
+						fmt.Fprintf(w, `<tr><td>%s</td><td>%s — %s</td><td>%d %s</td></tr>`,
+							htmlEscape(days), vw.Start, vw.End, vw.LimitMinutes, ui.min)
+					}
+					fmt.Fprint(w, `</table>`)
+				}
+
+				// Sleep.
+				if len(v.SleepTimes) > 0 {
+					for _, vs := range v.SleepTimes {
+						days := translateDays(vs.Days, lang)
+						fmt.Fprintf(w, `<div style="color:#a6adc8;font-size:0.82rem">%s: %s %s — %s</div>`,
+							ui.sleepTimes, htmlEscape(days), vs.Start, vs.End)
+					}
+				}
+
+				// Pre-day.
+				preStart := "16:00"
+				preEnd := "22:30"
+				if v.PreDayStart != "" {
+					preStart = v.PreDayStart
+				}
+				if v.PreDayEnd != "" {
+					preEnd = v.PreDayEnd
+				}
+				fmt.Fprintf(w, `<div style="color:#a6adc8;font-size:0.82rem">%s: %s — %s</div>`,
+					ui.preDay, preStart, preEnd)
+
+				fmt.Fprint(w, `</div>`)
+			}
+		}
 	}
 
 	// --- Apps section ---
@@ -913,6 +970,7 @@ type configUI struct {
 	catSystem                                              string
 	entWindows, sleepTimes                                 string
 	holidays, holidayWindows, holidaySleepTimes             string
+	vacations, preDay                                       string
 	colDays, colTimeRange, colLimit                        string
 	min                                                    string
 	warnBefore, sleepWarnBefore, fullLogging                string
@@ -935,6 +993,7 @@ func configUILabels(lang string) configUI {
 			colCategory: "Категория", catSystem: "системный",
 			entWindows: "Окна развлечений", sleepTimes: "Время сна",
 			holidays: "Праздники", holidayWindows: "Окна развлечений (праздники)", holidaySleepTimes: "Время сна (праздники)",
+			vacations: "Каникулы", preDay: "Предканикулярный день",
 			colDays: "Дни", colTimeRange: "Время", colLimit: "Лимит",
 			min: "мин",
 			warnBefore: "Предупреждение до конца развлечений", sleepWarnBefore: "Предупреждение до сна",
@@ -954,6 +1013,7 @@ func configUILabels(lang string) configUI {
 			colCategory: "Categoria", catSystem: "sistema",
 			entWindows: "Finestre di intrattenimento", sleepTimes: "Orari di sonno",
 			holidays: "Festività", holidayWindows: "Finestre intrattenimento (festivi)", holidaySleepTimes: "Orari sonno (festivi)",
+			vacations: "Vacanze", preDay: "Giorno pre-vacanza",
 			colDays: "Giorni", colTimeRange: "Orario", colLimit: "Limite",
 			min: "min",
 			warnBefore: "Avviso prima della fine intrattenimento", sleepWarnBefore: "Avviso prima del sonno",
@@ -973,6 +1033,7 @@ func configUILabels(lang string) configUI {
 			colCategory: "Categoría", catSystem: "sistema",
 			entWindows: "Ventanas de entretenimiento", sleepTimes: "Horarios de sueño",
 			holidays: "Festivos", holidayWindows: "Ventanas entretenimiento (festivos)", holidaySleepTimes: "Horarios sueño (festivos)",
+			vacations: "Vacaciones", preDay: "Día pre-vacaciones",
 			colDays: "Días", colTimeRange: "Horario", colLimit: "Límite",
 			min: "min",
 			warnBefore: "Aviso antes del fin del entretenimiento", sleepWarnBefore: "Aviso antes de dormir",
@@ -992,6 +1053,7 @@ func configUILabels(lang string) configUI {
 			colCategory: "Kategorie", catSystem: "System",
 			entWindows: "Unterhaltungsfenster", sleepTimes: "Schlafenszeiten",
 			holidays: "Feiertage", holidayWindows: "Unterhaltungsfenster (Feiertage)", holidaySleepTimes: "Schlafenszeiten (Feiertage)",
+			vacations: "Ferien", preDay: "Vorfeiertag",
 			colDays: "Tage", colTimeRange: "Zeit", colLimit: "Limit",
 			min: "Min.",
 			warnBefore: "Warnung vor Ende der Unterhaltung", sleepWarnBefore: "Warnung vor Schlafenszeit",
@@ -1011,6 +1073,7 @@ func configUILabels(lang string) configUI {
 			colCategory: "Kategoria", catSystem: "systemowa",
 			entWindows: "Okna rozrywki", sleepTimes: "Pora snu",
 			holidays: "Święta", holidayWindows: "Okna rozrywki (święta)", holidaySleepTimes: "Pora snu (święta)",
+			vacations: "Wakacje", preDay: "Dzień przed wakacjami",
 			colDays: "Dni", colTimeRange: "Czas", colLimit: "Limit",
 			min: "min",
 			warnBefore: "Ostrzeżenie przed końcem rozrywki", sleepWarnBefore: "Ostrzeżenie przed snem",
@@ -1030,6 +1093,7 @@ func configUILabels(lang string) configUI {
 			colCategory: "類別", catSystem: "系統",
 			entWindows: "娛樂時段", sleepTimes: "睡眠時間",
 			holidays: "假日", holidayWindows: "娛樂時段（假日）", holidaySleepTimes: "睡眠時間（假日）",
+			vacations: "假期", preDay: "假期前一天",
 			colDays: "天", colTimeRange: "時間", colLimit: "限制",
 			min: "分鐘",
 			warnBefore: "娛樂結束前警告", sleepWarnBefore: "睡眠前警告",
@@ -1049,6 +1113,7 @@ func configUILabels(lang string) configUI {
 			colCategory: "Category", catSystem: "system",
 			entWindows: "Entertainment Windows", sleepTimes: "Sleep Times",
 			holidays: "Holidays", holidayWindows: "Entertainment Windows (Holidays)", holidaySleepTimes: "Sleep Times (Holidays)",
+			vacations: "Vacations", preDay: "Pre-vacation day",
 			colDays: "Days", colTimeRange: "Time", colLimit: "Limit",
 			min: "min",
 			warnBefore: "Warning before entertainment ends", sleepWarnBefore: "Warning before sleep",
@@ -2691,6 +2756,8 @@ func translateDayType(dayType string, lang string) string {
 		"workday": {"en": "📅 Workday", "ru": "📅 Рабочий день", "it": "📅 Giorno lavorativo", "es": "📅 Día laboral", "de": "📅 Werktag", "pl": "📅 Dzień roboczy", "zh-TW": "📅 工作日"},
 		"weekend": {"en": "🎉 Weekend", "ru": "🎉 Выходной", "it": "🎉 Fine settimana", "es": "🎉 Fin de semana", "de": "🎉 Wochenende", "pl": "🎉 Weekend", "zh-TW": "🎉 週末"},
 		"holiday": {"en": "🎄 Holiday", "ru": "🎄 Праздник", "it": "🎄 Festivo", "es": "🎄 Festivo", "de": "🎄 Feiertag", "pl": "🎄 Święto", "zh-TW": "🎄 假日"},
+		"vacation": {"en": "🏖 Vacation", "ru": "🏖 Каникулы", "it": "🏖 Vacanza", "es": "🏖 Vacaciones", "de": "🏖 Ferien", "pl": "🏖 Wakacje", "zh-TW": "🏖 假期"},
+		"pre_vacation": {"en": "🏖 Pre-vacation", "ru": "🏖 Предканикулярный", "it": "🏖 Pre-vacanza", "es": "🏖 Pre-vacaciones", "de": "🏖 Vorferien", "pl": "🏖 Przed wakacjami", "zh-TW": "🏖 假期前"},
 	}
 	if labels, ok := m[dayType]; ok {
 		if label, ok := labels[lang]; ok {
@@ -2708,6 +2775,8 @@ func dayTypeColor(dayType string) string {
 		return "#f38ba8"
 	case "weekend":
 		return "#a6e3a1"
+	case "vacation", "pre_vacation":
+		return "#74c7ec"
 	default:
 		return "#89b4fa"
 	}
@@ -2815,6 +2884,8 @@ func topBarHTML(sp StatusProvider, currentLang, basePath, extraParams string) st
 		dayLabel := translateDayType(st.DayType, currentLang)
 		if st.HolidayName != "" {
 			dayLabel += ": " + st.HolidayName
+		} else if st.VacationName != "" {
+			dayLabel += ": " + st.VacationName
 		}
 		dayColor := dayTypeColor(st.DayType)
 		sb.WriteString(fmt.Sprintf(`<span style="background:%s;color:#1e1e2e;border-radius:4px;padding:3px 12px;font-size:0.82rem;font-weight:600">%s</span>`,

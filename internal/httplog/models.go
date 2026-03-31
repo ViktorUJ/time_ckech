@@ -11,14 +11,16 @@ type StatusResponse struct {
 	Mode                 string   `json:"mode"`                    // "inside_window", "outside_window", "sleep_time"
 	ServiceMode          string   `json:"service_mode"`            // "normal", "filter_paused", "entertainment_paused", "learning"
 	DayType              string   `json:"day_type"`                // "workday", "weekend", "holiday"
-	HolidayName          string   `json:"holiday_name,omitempty"`  // название праздника (если day_type == "holiday")
+	HolidayName          string   `json:"holiday_name,omitempty"`
+	VacationName         string   `json:"vacation_name,omitempty"`  // название праздника (если day_type == "holiday")
 	EntertainmentMinutes int      `json:"entertainment_minutes"`
 	LimitMinutes         int      `json:"limit_minutes"`
 	MinutesRemaining     int      `json:"minutes_remaining"`
 	BonusMinutes         int      `json:"bonus_minutes"`
 	ComputerMinutes      int      `json:"computer_minutes"`
 	ComputerLimitMinutes int      `json:"computer_limit_minutes"`
-	ActiveWindow         *string  `json:"active_window,omitempty"` // "17:00-21:00" или nil
+	ActiveWindow         *string  `json:"active_window,omitempty"`
+	NextWindow           string   `json:"next_window,omitempty"` // "17:00-21:00" или nil
 	SleepTime            *string  `json:"sleep_time,omitempty"`
 	SleepWindow          string   `json:"sleep_window,omitempty"`  // "22:00-07:00" — расписание сна на сегодня
 	SleepOverride        string   `json:"sleep_override,omitempty"` // "23:00-07:30" — ручная корректировка

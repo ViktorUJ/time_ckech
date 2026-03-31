@@ -834,6 +834,7 @@ func (s *Service) CurrentStatus() httplog.StatusResponse {
 		ServiceMode:          svcMode,
 		DayType:              string(schedState.DayType),
 		HolidayName:          schedState.HolidayName,
+		VacationName:         schedState.VacationName,
 		EntertainmentMinutes: s.entertainmentSeconds / 60,
 		LimitMinutes:         schedState.LimitMinutes,
 		BonusMinutes:         s.bonusSeconds / 60,
@@ -863,6 +864,11 @@ func (s *Service) CurrentStatus() httplog.StatusResponse {
 	if schedState.CurrentWindow != nil {
 		w := fmt.Sprintf("%s-%s", schedState.CurrentWindow.Start, schedState.CurrentWindow.End)
 		resp.ActiveWindow = &w
+	} else {
+		// Показываем ближайшее окно на сегодня (NextWindow).
+		if nw := s.scheduler.NextWindowToday(now); nw != nil {
+			resp.NextWindow = fmt.Sprintf("%s-%s (%d min)", nw.Start, nw.End, nw.LimitMinutes)
+		}
 	}
 
 	// Информация о паузе/режиме.
@@ -883,10 +889,25 @@ func (s *Service) CurrentStatus() httplog.StatusResponse {
 	cfg := s.configManager.Current()
 	if cfg != nil {
 		today := strings.ToLower(now.Weekday().String())
-		sleepTimes := cfg.Schedule.SleepTimes
-		if schedState.DayType == scheduler.DayTypeHoliday && len(cfg.Schedule.HolidaySleepTimes) > 0 {
-			sleepTimes = cfg.Schedule.HolidaySleepTimes
+		var sleepTimes []config.SleepTimeSlot
+
+		switch schedState.DayType {
+		case scheduler.DayTypeVacation:
+			if v := s.scheduler.ActiveVacationAt(now); v != nil && len(v.SleepTimes) > 0 {
+				sleepTimes = v.SleepTimes
+			} else {
+				sleepTimes = cfg.Schedule.SleepTimes
+			}
+		case scheduler.DayTypeHoliday:
+			if len(cfg.Schedule.HolidaySleepTimes) > 0 {
+				sleepTimes = cfg.Schedule.HolidaySleepTimes
+			} else {
+				sleepTimes = cfg.Schedule.SleepTimes
+			}
+		default:
+			sleepTimes = cfg.Schedule.SleepTimes
 		}
+
 		for _, st := range sleepTimes {
 			for _, d := range st.Days {
 				if strings.ToLower(d) == today {

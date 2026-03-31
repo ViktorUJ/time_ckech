@@ -31,20 +31,60 @@ func (s *Scheduler) UpdateSchedule(schedule config.ScheduleConfig) {
 func (s *Scheduler) CurrentState(now time.Time) ScheduleState {
 	dayType := s.determineDayType(now)
 	holidayName := s.holidayName(now)
+	vacationName := s.vacationName(now)
 
 	// Select windows and sleep times based on day type.
 	var entertainmentWindows []config.TimeWindow
 	var sleepTimes []config.SleepTimeSlot
 
-	if dayType == DayTypeHoliday && len(s.schedule.HolidayWindows) > 0 {
-		entertainmentWindows = s.schedule.HolidayWindows
-	} else {
+	switch dayType {
+	case DayTypeVacation:
+		if v := s.activeVacation(now); v != nil {
+			entertainmentWindows = v.Windows
+			if len(v.SleepTimes) > 0 {
+				sleepTimes = v.SleepTimes
+			} else {
+				sleepTimes = s.schedule.SleepTimes
+			}
+		}
+	case DayTypePreVacation:
+		// Предканикулярный день: лимит как на каникулах, окно 16:00-22:30.
+		tomorrow := now.AddDate(0, 0, 1)
+		if v := s.activeVacation(tomorrow); v != nil {
+			preStart := "16:00"
+			preEnd := "22:30"
+			if v.PreDayStart != "" {
+				preStart = v.PreDayStart
+			}
+			if v.PreDayEnd != "" {
+				preEnd = v.PreDayEnd
+			}
+			// Берём лимит из первого vacation window.
+			limit := 0
+			if len(v.Windows) > 0 {
+				limit = v.Windows[0].LimitMinutes
+			}
+			entertainmentWindows = []config.TimeWindow{{
+				Days:         []string{"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"},
+				Start:        preStart,
+				End:          preEnd,
+				LimitMinutes: limit,
+			}}
+			sleepTimes = s.schedule.SleepTimes
+		}
+	case DayTypeHoliday:
+		if len(s.schedule.HolidayWindows) > 0 {
+			entertainmentWindows = s.schedule.HolidayWindows
+		} else {
+			entertainmentWindows = s.schedule.EntertainmentWindows
+		}
+		if len(s.schedule.HolidaySleepTimes) > 0 {
+			sleepTimes = s.schedule.HolidaySleepTimes
+		} else {
+			sleepTimes = s.schedule.SleepTimes
+		}
+	default:
 		entertainmentWindows = s.schedule.EntertainmentWindows
-	}
-
-	if dayType == DayTypeHoliday && len(s.schedule.HolidaySleepTimes) > 0 {
-		sleepTimes = s.schedule.HolidaySleepTimes
-	} else {
 		sleepTimes = s.schedule.SleepTimes
 	}
 
@@ -54,6 +94,7 @@ func (s *Scheduler) CurrentState(now time.Time) ScheduleState {
 			Mode:        ModeSleepTime,
 			DayType:     dayType,
 			HolidayName: holidayName,
+			VacationName: vacationName,
 			SleepTime:   slot,
 		}
 	}
@@ -64,31 +105,130 @@ func (s *Scheduler) CurrentState(now time.Time) ScheduleState {
 			Mode:          ModeInsideWindow,
 			DayType:       dayType,
 			HolidayName:   holidayName,
+			VacationName:  vacationName,
 			CurrentWindow: tw,
 			LimitMinutes:  tw.LimitMinutes,
 		}
 	}
 
 	return ScheduleState{
-		Mode:        ModeOutsideWindow,
-		DayType:     dayType,
-		HolidayName: holidayName,
+		Mode:         ModeOutsideWindow,
+		DayType:      dayType,
+		HolidayName:  holidayName,
+		VacationName: vacationName,
 	}
 }
 
-// determineDayType определяет тип дня: праздник, выходной или рабочий.
+// determineDayType определяет тип дня: каникулы, предканикулярный, праздник, выходной или рабочий.
 func (s *Scheduler) determineDayType(now time.Time) DayType {
 	dateStr := now.Format("2006-01-02")
+
+	// Проверяем каникулы.
+	if s.activeVacation(now) != nil {
+		return DayTypeVacation
+	}
+
+	// Проверяем предканикулярный день (день перед каникулами).
+	tomorrow := now.AddDate(0, 0, 1)
+	if s.activeVacation(tomorrow) != nil {
+		return DayTypePreVacation
+	}
+
+	// Проверяем праздники.
 	for _, h := range s.schedule.Holidays {
 		if h.Date == dateStr {
 			return DayTypeHoliday
 		}
 	}
+
 	wd := now.Weekday()
 	if wd == time.Saturday || wd == time.Sunday {
 		return DayTypeWeekend
 	}
 	return DayTypeWorkday
+}
+
+// activeVacation возвращает активные каникулы для даты, или nil.
+func (s *Scheduler) activeVacation(t time.Time) *config.Vacation {
+	dateStr := t.Format("2006-01-02")
+	for i := range s.schedule.Vacations {
+		v := &s.schedule.Vacations[i]
+		if dateStr >= v.StartDate && dateStr <= v.EndDate {
+			return v
+		}
+	}
+	return nil
+}
+
+// ActiveVacationAt — публичный метод для получения активных каникул.
+func (s *Scheduler) ActiveVacationAt(t time.Time) *config.Vacation {
+	return s.activeVacation(t)
+}
+
+// NextWindowToday возвращает ближайшее окно развлечений на сегодня (ещё не начавшееся).
+func (s *Scheduler) NextWindowToday(now time.Time) *config.TimeWindow {
+	dayType := s.determineDayType(now)
+	var windows []config.TimeWindow
+
+	switch dayType {
+	case DayTypeVacation:
+		if v := s.activeVacation(now); v != nil {
+			windows = v.Windows
+		}
+	case DayTypePreVacation:
+		tomorrow := now.AddDate(0, 0, 1)
+		if v := s.activeVacation(tomorrow); v != nil {
+			preStart := "16:00"
+			preEnd := "22:30"
+			if v.PreDayStart != "" {
+				preStart = v.PreDayStart
+			}
+			if v.PreDayEnd != "" {
+				preEnd = v.PreDayEnd
+			}
+			limit := 0
+			if len(v.Windows) > 0 {
+				limit = v.Windows[0].LimitMinutes
+			}
+			windows = []config.TimeWindow{{
+				Days: []string{"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"},
+				Start: preStart, End: preEnd, LimitMinutes: limit,
+			}}
+		}
+	case DayTypeHoliday:
+		if len(s.schedule.HolidayWindows) > 0 {
+			windows = s.schedule.HolidayWindows
+		} else {
+			windows = s.schedule.EntertainmentWindows
+		}
+	default:
+		windows = s.schedule.EntertainmentWindows
+	}
+
+	nowMinutes := now.Hour()*60 + now.Minute()
+	for i := range windows {
+		tw := &windows[i]
+		if !dayMatches(now, tw.Days) {
+			continue
+		}
+		startH, startM := parseTime(tw.Start)
+		if startH*60+startM > nowMinutes {
+			return tw
+		}
+	}
+	return nil
+}
+
+// vacationName возвращает название каникул для даты.
+func (s *Scheduler) vacationName(now time.Time) string {
+	if v := s.activeVacation(now); v != nil {
+		return v.Name
+	}
+	tomorrow := now.AddDate(0, 0, 1)
+	if v := s.activeVacation(tomorrow); v != nil {
+		return v.Name
+	}
+	return ""
 }
 
 // holidayName возвращает название праздника для текущей даты, или "".
@@ -109,10 +249,24 @@ func (s *Scheduler) IsSleepTime(now time.Time) bool {
 
 // activeSleepSlot returns the active sleep time slot for the given time, or nil.
 func (s *Scheduler) activeSleepSlot(now time.Time) *config.SleepTimeSlot {
-	// Use holiday sleep times if today is a holiday and they are configured.
-	sleepTimes := s.schedule.SleepTimes
-	if s.determineDayType(now) == DayTypeHoliday && len(s.schedule.HolidaySleepTimes) > 0 {
-		sleepTimes = s.schedule.HolidaySleepTimes
+	dayType := s.determineDayType(now)
+	var sleepTimes []config.SleepTimeSlot
+
+	switch dayType {
+	case DayTypeVacation:
+		if v := s.activeVacation(now); v != nil && len(v.SleepTimes) > 0 {
+			sleepTimes = v.SleepTimes
+		} else {
+			sleepTimes = s.schedule.SleepTimes
+		}
+	case DayTypeHoliday:
+		if len(s.schedule.HolidaySleepTimes) > 0 {
+			sleepTimes = s.schedule.HolidaySleepTimes
+		} else {
+			sleepTimes = s.schedule.SleepTimes
+		}
+	default:
+		sleepTimes = s.schedule.SleepTimes
 	}
 	return s.activeSleepSlotFrom(now, sleepTimes)
 }
@@ -206,8 +360,16 @@ func (s *Scheduler) ShouldWarnSleep(now time.Time) (bool, int) {
 	}
 
 	sleepTimes := s.schedule.SleepTimes
-	if s.determineDayType(now) == DayTypeHoliday && len(s.schedule.HolidaySleepTimes) > 0 {
-		sleepTimes = s.schedule.HolidaySleepTimes
+	dayType := s.determineDayType(now)
+	switch dayType {
+	case DayTypeVacation:
+		if v := s.activeVacation(now); v != nil && len(v.SleepTimes) > 0 {
+			sleepTimes = v.SleepTimes
+		}
+	case DayTypeHoliday:
+		if len(s.schedule.HolidaySleepTimes) > 0 {
+			sleepTimes = s.schedule.HolidaySleepTimes
+		}
 	}
 
 	for i := range sleepTimes {

@@ -148,6 +148,7 @@ var translations = map[Lang]map[string]string{
 		"status.sleep":         "Sleep time — computer unavailable",
 		"status.outside":       "No entertainment window now",
 		"status.window":        "Entertainment window",
+		"status.next_window":   "Next window",
 		"status.bonus":         "Bonus: %+d min",
 		"status.bonus_short":   "Bonus",
 		"status.sleep_current": "Current sleep time",
@@ -191,6 +192,8 @@ var translations = map[Lang]map[string]string{
 		"daytype.workday":       "Workday",
 		"daytype.weekend":       "Weekend",
 		"daytype.holiday":       "Holiday",
+		"daytype.vacation":      "Vacation",
+		"daytype.pre_vacation":  "Pre-vacation",
 	},
 	LangRU: {
 		"tray.title":           "Родительский контроль",
@@ -229,6 +232,7 @@ var translations = map[Lang]map[string]string{
 		"status.sleep":         "Время сна — компьютер недоступен",
 		"status.outside":       "Сейчас нет разрешённого окна",
 		"status.window":        "Окно развлечений",
+		"status.next_window":   "Следующее окно",
 		"status.bonus":         "Бонус: %+d мин.",
 		"status.bonus_short":   "Бонус",
 		"status.sleep_current": "Текущее время сна",
@@ -272,6 +276,8 @@ var translations = map[Lang]map[string]string{
 		"daytype.workday":       "Рабочий день",
 		"daytype.weekend":       "Выходной",
 		"daytype.holiday":       "Праздник",
+		"daytype.vacation":      "Каникулы",
+		"daytype.pre_vacation":  "Предканикулярный",
 	},
 	LangIT: {
 		"tray.title":           "Controllo Genitori",

@@ -15,16 +15,19 @@ const (
 type DayType string
 
 const (
-	DayTypeWorkday DayType = "workday"
-	DayTypeWeekend DayType = "weekend"
-	DayTypeHoliday DayType = "holiday"
+	DayTypeWorkday    DayType = "workday"
+	DayTypeWeekend    DayType = "weekend"
+	DayTypeHoliday    DayType = "holiday"
+	DayTypeVacation   DayType = "vacation"
+	DayTypePreVacation DayType = "pre_vacation"
 )
 
 // ScheduleState — текущее состояние расписания.
 type ScheduleState struct {
 	Mode             Mode                 `json:"mode"`
 	DayType          DayType              `json:"day_type"`                    // workday, weekend, holiday
-	HolidayName      string               `json:"holiday_name,omitempty"`      // название праздника
+	HolidayName      string               `json:"holiday_name,omitempty"`
+	VacationName     string               `json:"vacation_name,omitempty"`      // название праздника
 	CurrentWindow    *config.TimeWindow   `json:"current_window,omitempty"`    // nil если вне окна
 	SleepTime        *config.SleepTimeSlot `json:"sleep_time,omitempty"`       // nil если не время сна
 	MinutesRemaining int                  `json:"minutes_remaining"`           // минут до конца окна/лимита

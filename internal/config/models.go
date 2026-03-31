@@ -42,12 +42,24 @@ type ScheduleConfig struct {
 	HTTPLogPort           int             `json:"http_log_port"`                    // default: 8080
 	EntertainmentApps     []string        `json:"entertainment_apps"`               // доп. exe-файлы развлекательных приложений
 	TotalComputerMinutes  int             `json:"total_computer_minutes,omitempty"` // лимит общего времени за компьютером (0 = без ограничений)
+	Vacations             []Vacation      `json:"vacations,omitempty"`              // каникулы с отдельным планом
 }
 
 // Holiday — праздничный день.
 type Holiday struct {
 	Date string `json:"date"`           // "2026-01-01"
 	Name string `json:"name,omitempty"` // опциональное название праздника
+}
+
+// Vacation — каникулы (диапазон дат с отдельным планом).
+type Vacation struct {
+	Name        string          `json:"name,omitempty"`
+	StartDate   string          `json:"start_date"`                // "2026-06-01"
+	EndDate     string          `json:"end_date"`                  // "2026-08-31"
+	Windows     []TimeWindow    `json:"windows"`                   // окна развлечений на каникулах
+	SleepTimes  []SleepTimeSlot `json:"sleep_times,omitempty"`     // время сна (если не задано — обычное)
+	PreDayStart string          `json:"pre_day_start,omitempty"`   // начало окна за день до каникул, по умолчанию "16:00"
+	PreDayEnd   string          `json:"pre_day_end,omitempty"`     // конец окна за день до каникул, по умолчанию "22:30"
 }
 
 // TimeWindow — временное окно для развлекательного контента.

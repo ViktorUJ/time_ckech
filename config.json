@@ -56,7 +56,20 @@
       { "name": "Immersed VR Service", "executable": "Immersed-service.exe" },
       { "name": "OpenVPN Helper", "executable": "ovpnhelper_service.exe" },
       { "name": "OpenVPN Connect Agent", "executable": "agent_ovpnconnect.exe" },
-      { "name": "Updater", "executable": "updater.exe" }
+      { "name": "Updater", "executable": "updater.exe" },
+      { "name": "Windows Copilot", "executable": "Copilot.exe" },
+      { "name": "Microsoft 365 Copilot", "executable": "M365Copilot.exe" },
+      { "name": "WhatsApp", "executable": "WhatsApp.Root.exe" },
+      { "name": "Windows SmartScreen", "executable": "smartscreen.exe" },
+      { "name": "Windows Security Tray", "executable": "SecurityHealthSystray.exe" },
+      { "name": "Lenovo Diagnostics", "executable": "DTAgent.exe" },
+      { "name": "Cross Device Service", "executable": "CrossDeviceService.exe" },
+      { "name": "Cross Device Resume", "executable": "CrossDeviceResume.exe" },
+      { "name": "Nahimic Audio", "executable": "NahimicAPO4Volume.exe" },
+      { "name": "Java Update Checker", "executable": "jucheck.exe" },
+      { "name": "Java Update Scheduler", "executable": "jusched.exe" },
+      { "name": "Realtek Audio QS", "executable": "QSHelper.exe" },
+      { "name": "IPF Helper", "executable": "ipf_helper.exe" }
     ]
   },
   "allowed_sites": {
@@ -72,6 +85,7 @@
       { "domain": "drive.google.com", "include_subdomains": false, "category": "system" },
       { "domain": "classroom.google.com", "include_subdomains": false, "category": "system" },
       { "domain": "calendar.google.com", "include_subdomains": false, "category": "system" },
+      { "domain": "meet.google.com", "include_subdomains": false, "category": "system" },
       { "domain": "office.com", "include_subdomains": true, "category": "system" },
       { "domain": "live.com", "include_subdomains": true, "category": "system" },
       { "domain": "onedrive.com", "include_subdomains": true, "category": "system" },
@@ -133,8 +147,8 @@
   "schedule": {
     "entertainment_windows": [
       { "days": ["friday"], "start": "17:00", "end": "22:00", "limit_minutes": 180 },
-      { "days": ["saturday"], "start": "10:00", "end": "22:00", "limit_minutes": 120 },
-      { "days": ["sunday"], "start": "10:00", "end": "21:00", "limit_minutes": 60 }
+      { "days": ["saturday"], "start": "08:00", "end": "22:00", "limit_minutes": 120 },
+      { "days": ["sunday"], "start": "08:00", "end": "21:00", "limit_minutes": 60 }
     ],
     "sleep_times": [
       { "days": ["monday", "tuesday", "wednesday", "thursday"], "start": "22:00", "end": "07:00" },
@@ -161,7 +175,7 @@
       { "date": "2026-11-23", "name": "Saint George's Day" }
     ],
     "holiday_windows": [
-      { "days": ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"], "start": "10:00", "end": "22:00", "limit_minutes": 180 }
+      { "days": ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"], "start": "08:00", "end": "22:00", "limit_minutes": 180 }
     ],
     "holiday_sleep_times": [
       { "days": ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"], "start": "23:00", "end": "07:00" }
@@ -176,7 +190,29 @@
       "vlc.exe", "wmplayer.exe", "potplayer.exe", "potplayermini.exe",
       "potplayermini64.exe", "potplayer64.exe", "kmplayer.exe", "kmplayer64.exe",
       "mpv.exe", "smplayer.exe", "gom.exe", "bsplayer.exe", "video.ui.exe",
-      "Solitaire.exe"
+      "Solitaire.exe",
+      "EMPIRESX.EXE",
+      "Overwolf.exe", "OverwolfBrowser.exe", "OverwolfHelper.exe", "OverwolfHelper64.exe",
+      "GameBar.exe", "GameBarFTServer.exe",
+      "XboxPcAppFT.exe", "XboxGameBarWidgets.exe",
+      "EdgeGameAssist.exe",
+      "SEGameTool.exe",
+      "NhNotifSys.exe"
+    ],
+    "vacations": [
+      {
+        "name": "Spring vacation",
+        "start_date": "2026-04-01",
+        "end_date": "2026-04-14",
+        "windows": [
+          { "days": ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"], "start": "08:00", "end": "22:00", "limit_minutes": 180 }
+        ],
+        "sleep_times": [
+          { "days": ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"], "start": "23:00", "end": "08:00" }
+        ],
+        "pre_day_start": "16:00",
+        "pre_day_end": "22:30"
+      }
     ]
   }
 }
