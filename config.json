@@ -86,6 +86,8 @@
       { "domain": "classroom.google.com", "include_subdomains": false, "category": "system" },
       { "domain": "calendar.google.com", "include_subdomains": false, "category": "system" },
       { "domain": "meet.google.com", "include_subdomains": false, "category": "system" },
+      { "domain": "gemini.google.com", "include_subdomains": false, "category": "system" },
+      { "domain": "accounts.google.com", "include_subdomains": false, "category": "system" },
       { "domain": "office.com", "include_subdomains": true, "category": "system" },
       { "domain": "live.com", "include_subdomains": true, "category": "system" },
       { "domain": "onedrive.com", "include_subdomains": true, "category": "system" },
@@ -205,7 +207,7 @@
         "start_date": "2026-04-01",
         "end_date": "2026-04-14",
         "windows": [
-          { "days": ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"], "start": "08:00", "end": "22:00", "limit_minutes": 180 }
+          { "days": ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"], "start": "08:00", "end": "22:00", "limit_minutes": 120 }
         ],
         "sleep_times": [
           { "days": ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"], "start": "23:00", "end": "08:00" }

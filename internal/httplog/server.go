@@ -52,6 +52,8 @@ type PauseProvider interface {
 	SetServiceMode(password, mode string, minutes int) (bool, string)
 	GetServiceMode() string
 	DrainNotifications() []Notification
+	SelfPauseEntertainment() (bool, string)
+	SelfUnpauseEntertainment() (bool, string)
 }
 
 // ConfigReloader abstracts forced config reload.
@@ -240,6 +242,7 @@ func (h *HTTPLogServer) Start(ctx context.Context) error {
 	mux.HandleFunc("/adjust-bonus", h.handleAdjustBonus)
 	mux.HandleFunc("/adjust-sleep", h.handleAdjustSleep)
 	mux.HandleFunc("/notifications", h.handleNotifications)
+	mux.HandleFunc("/self-pause", h.handleSelfPause)
 
 	h.server = &http.Server{
 		Addr:    fmt.Sprintf(":%d", h.port),
@@ -1296,6 +1299,34 @@ func (h *HTTPLogServer) handleLearningClear(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(PauseResponse{OK: true, Message: "Reports cleared"})
 }
 
+func (h *HTTPLogServer) handleSelfPause(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.pauseProvider == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(PauseResponse{OK: false, Message: "not configured"})
+		return
+	}
+	var req struct {
+		Action string `json:"action"` // "pause" or "unpause"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+	var ok bool
+	var msg string
+	if req.Action == "unpause" {
+		ok, msg = h.pauseProvider.SelfUnpauseEntertainment()
+	} else {
+		ok, msg = h.pauseProvider.SelfPauseEntertainment()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(PauseResponse{OK: ok, Message: msg})
+}
+
 func (h *HTTPLogServer) handleNotifications(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -2096,8 +2127,8 @@ type serviceModeUI struct {
 
 func serviceModeLabels(lang string) serviceModeUI {
 	modes := map[string]map[string]string{
-		"en":    {"normal": "Normal", "filter_paused": "Filter Paused", "entertainment_paused": "Entertainment Paused", "learning": "Learning Mode", "unrestricted": "Unrestricted"},
-		"ru":    {"normal": "Обычный", "filter_paused": "Фильтрация приостановлена", "entertainment_paused": "Развлечения приостановлены", "learning": "Режим обучения", "unrestricted": "Без ограничений"},
+		"en":    {"normal": "Normal", "filter_paused": "Filter Paused", "entertainment_paused": "Entertainment Paused", "learning": "Learning Mode", "unrestricted": "Unrestricted", "self_entertainment_paused": "Entertainment Paused (self)"},
+		"ru":    {"normal": "Обычный", "filter_paused": "Фильтрация приостановлена", "entertainment_paused": "Развлечения приостановлены", "learning": "Режим обучения", "unrestricted": "Без ограничений", "self_entertainment_paused": "Развлечения приостановлены (ребёнок)"},
 		"it":    {"normal": "Normale", "filter_paused": "Filtro in pausa", "entertainment_paused": "Intrattenimento in pausa", "learning": "Modalità apprendimento", "unrestricted": "Senza restrizioni"},
 		"es":    {"normal": "Normal", "filter_paused": "Filtro en pausa", "entertainment_paused": "Entretenimiento en pausa", "learning": "Modo aprendizaje", "unrestricted": "Sin restricciones"},
 		"de":    {"normal": "Normal", "filter_paused": "Filter pausiert", "entertainment_paused": "Unterhaltung pausiert", "learning": "Lernmodus", "unrestricted": "Uneingeschränkt"},
@@ -2711,7 +2742,7 @@ func writePauseBanner(w http.ResponseWriter, sp StatusProvider, lang string) {
 	// Цвет баннера зависит от режима.
 	bgColor := "#f38ba8"
 	switch st.ServiceMode {
-	case "entertainment_paused":
+	case "entertainment_paused", "self_entertainment_paused":
 		bgColor = "#fab387"
 	case "learning":
 		bgColor = "#89b4fa"

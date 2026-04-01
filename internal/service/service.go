@@ -720,12 +720,11 @@ func joinUnique(items []string) string {
 
 // checkWarnings checks and emits warnings for entertainment limit and sleep time.
 func (s *Service) checkWarnings(now time.Time, schedState scheduler.ScheduleState) {
-	// Warn about entertainment limit approaching.
+	// Warn about entertainment limit approaching — only log, no popup.
 	if schedState.Mode == scheduler.ModeInsideWindow && schedState.LimitMinutes > 0 {
 		if s.scheduler.ShouldWarnEntertainment(s.entertainmentSeconds, schedState.LimitMinutes) {
 			remaining := schedState.LimitMinutes - s.entertainmentSeconds/60
 			msg := fmt.Sprintf("Entertainment time ends in %d min.", remaining)
-			_ = s.notifier.ShowNotification("Parental Control", msg)
 			_ = s.logger.LogEvent(logger.LogEntry{
 				Timestamp: now,
 				EventType: logger.EventWarning,
@@ -734,23 +733,12 @@ func (s *Service) checkWarnings(now time.Time, schedState scheduler.ScheduleStat
 		}
 	}
 
-	// Warn about sleep time approaching — only at 15, 5 and 1 minute marks.
+	// Warn about sleep time approaching — only at 1 minute.
 	if shouldWarn, minutesLeft := s.scheduler.ShouldWarnSleep(now); shouldWarn {
-		shouldShow := false
-		switch {
-		case minutesLeft <= 1 && s.lastSleepWarnMinute != 1:
-			shouldShow = true
+		if minutesLeft <= 1 && s.lastSleepWarnMinute != 1 {
 			s.lastSleepWarnMinute = 1
-		case minutesLeft <= 5 && minutesLeft > 1 && s.lastSleepWarnMinute != 5:
-			shouldShow = true
-			s.lastSleepWarnMinute = 5
-		case minutesLeft <= 15 && minutesLeft > 5 && s.lastSleepWarnMinute != 15:
-			shouldShow = true
-			s.lastSleepWarnMinute = 15
-		}
-
-		if shouldShow {
-			_ = s.sleepManager.WarnUpcoming(minutesLeft)
+			_ = s.notifier.ShowNotification("Parental Control",
+				fmt.Sprintf("Sleep time starts in %d min.", minutesLeft))
 			_ = s.logger.LogEvent(logger.LogEntry{
 				Timestamp: now,
 				EventType: logger.EventWarning,
@@ -758,7 +746,6 @@ func (s *Service) checkWarnings(now time.Time, schedState scheduler.ScheduleStat
 			})
 		}
 	} else {
-		// Сбрасываем когда не в зоне предупреждения.
 		s.lastSleepWarnMinute = -1
 	}
 }
@@ -957,7 +944,8 @@ func (s *Service) GetServiceMode() string {
 
 // IsEntertainmentPaused возвращает true если развлечения приостановлены.
 func (s *Service) IsEntertainmentPaused() bool {
-	return s.GetServiceMode() == "entertainment_paused"
+	mode := s.GetServiceMode()
+	return mode == "entertainment_paused" || mode == "self_entertainment_paused"
 }
 
 // IsLearningMode возвращает true если сервис в режиме обучения.
@@ -975,7 +963,7 @@ func (s *Service) SetServiceMode(password, mode string, minutes int) (bool, stri
 	}
 
 	switch mode {
-	case "normal", "filter_paused", "entertainment_paused", "learning", "unrestricted":
+	case "normal", "filter_paused", "entertainment_paused", "learning", "unrestricted", "self_entertainment_paused":
 	default:
 		return false, "Invalid mode"
 	}
@@ -1225,6 +1213,40 @@ func (s *Service) ChangeConfigURL(password, newURL string) (bool, string) {
 		Message:   fmt.Sprintf("Config URL changed: %s → %s", oldURL, newURL),
 	})
 	return true, "Config URL changed"
+}
+
+// SelfPauseEntertainment — пауза развлечений без пароля (от ребёнка).
+func (s *Service) SelfPauseEntertainment() (bool, string) {
+	s.pauseMu.Lock()
+	s.serviceMode = "self_entertainment_paused"
+	s.modeUntil = time.Time{} // бессрочно до ручной отмены
+	s.pauseMu.Unlock()
+
+	_ = s.logger.LogEvent(logger.LogEntry{
+		Timestamp: time.Now(),
+		EventType: logger.EventInfo,
+		Message:   "Entertainment self-paused by user",
+	})
+	return true, "Entertainment paused"
+}
+
+// SelfUnpauseEntertainment — снятие паузы развлечений без пароля.
+func (s *Service) SelfUnpauseEntertainment() (bool, string) {
+	s.pauseMu.Lock()
+	if s.serviceMode != "self_entertainment_paused" {
+		s.pauseMu.Unlock()
+		return false, "Not in self-pause mode"
+	}
+	s.serviceMode = "normal"
+	s.modeUntil = time.Time{}
+	s.pauseMu.Unlock()
+
+	_ = s.logger.LogEvent(logger.LogEntry{
+		Timestamp: time.Now(),
+		EventType: logger.EventInfo,
+		Message:   "Entertainment self-pause removed by user",
+	})
+	return true, "Entertainment resumed"
 }
 
 // QueueNotification добавляет уведомление в очередь для tray.

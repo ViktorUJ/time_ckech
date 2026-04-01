@@ -37,6 +37,7 @@ var (
 // Menu items stored globally for dynamic label updates on language switch.
 var (
 	mStatus    *systray.MenuItem
+	mSelfPause *systray.MenuItem
 	mConfig    *systray.MenuItem
 	mLogs      *systray.MenuItem
 	mStats     *systray.MenuItem
@@ -109,6 +110,7 @@ func onReady() {
 	systray.AddSeparator()
 
 	mStatus = systray.AddMenuItem(tr("menu.status"), "")
+	mSelfPause = systray.AddMenuItem(tr("menu.self_pause"), "")
 	mConfig = systray.AddMenuItem(tr("menu.config"), "")
 	mLogs = systray.AddMenuItem(tr("menu.logs"), "")
 	mStats = systray.AddMenuItem(tr("menu.stats"), "")
@@ -150,6 +152,8 @@ func onReady() {
 			select {
 			case <-mStatus.ClickedCh:
 				showStatusPopup()
+			case <-mSelfPause.ClickedCh:
+				go handleSelfPause()
 			case <-mPassword.ClickedCh:
 				go handleChangePassword()
 			case <-mReload.ClickedCh:
@@ -293,6 +297,7 @@ func handleModeClicks() {
 
 func updateMenuLabels() {
 	mStatus.SetTitle(tr("menu.status"))
+	mSelfPause.SetTitle(tr("menu.self_pause"))
 	mConfig.SetTitle(tr("menu.config"))
 	mLogs.SetTitle(tr("menu.logs"))
 	mStats.SetTitle(tr("menu.stats"))
@@ -387,7 +392,7 @@ func updateServiceModeIcon(s *statusResponse) {
 	switch mode {
 	case "filter_paused":
 		systray.SetIcon(hourglassGreenICO)
-	case "entertainment_paused":
+	case "entertainment_paused", "self_entertainment_paused":
 		systray.SetIcon(hourglassPausedICO)
 	case "learning":
 		systray.SetIcon(hourglassLearningICO)
@@ -794,6 +799,32 @@ func handleAdjustSleep() {
 		showMessageBox(tr("tray.title"), tr("pause.wrong_password"))
 	}
 	refreshStatusNow()
+}
+
+// handleSelfPause — пауза/снятие развлечений без пароля.
+func handleSelfPause() {
+	s := fetchCurrentStatus()
+	if s != nil && s.ServiceMode == "self_entertainment_paused" {
+		// Снять паузу.
+		resp, err := httpClient.Post(baseURL+"/self-pause", "application/json",
+			bytes.NewReader([]byte(`{"action":"unpause"}`)))
+		if err != nil {
+			showMessageBox(tr("tray.title"), tr("status.unavailable"))
+			return
+		}
+		resp.Body.Close()
+		refreshStatusNow()
+	} else {
+		// Поставить паузу.
+		resp, err := httpClient.Post(baseURL+"/self-pause", "application/json",
+			bytes.NewReader([]byte(`{"action":"pause"}`)))
+		if err != nil {
+			showMessageBox(tr("tray.title"), tr("status.unavailable"))
+			return
+		}
+		resp.Body.Close()
+		refreshStatusNow()
+	}
 }
 
 // fetchCurrentStatus получает текущий статус для отображения в диалогах.
