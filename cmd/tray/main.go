@@ -414,6 +414,19 @@ func updateServiceModeIcon(s *statusResponse) {
 			mModeSubs[i].Uncheck()
 		}
 	}
+
+	// Обновляем текст кнопки паузы развлечений.
+	if mode == "self_entertainment_paused" {
+		mSelfPause.SetTitle(tr("menu.self_unpause"))
+		mSelfPause.Enable()
+	} else if mode == "normal" {
+		mSelfPause.SetTitle(tr("menu.self_pause"))
+		mSelfPause.Enable()
+	} else {
+		// Любой другой режим от админа — кнопка неактивна.
+		mSelfPause.SetTitle(tr("menu.self_pause"))
+		mSelfPause.Disable()
+	}
 }
 
 func fetchStatus(client *http.Client, url string) (*statusResponse, error) {

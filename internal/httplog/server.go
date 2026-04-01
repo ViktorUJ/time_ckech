@@ -1304,6 +1304,16 @@ func (h *HTTPLogServer) handleSelfPause(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Только с localhost.
+	ip := r.RemoteAddr
+	if idx := strings.LastIndex(ip, ":"); idx >= 0 {
+		ip = ip[:idx]
+	}
+	ip = strings.Trim(ip, "[]")
+	if ip != "127.0.0.1" && ip != "::1" && ip != "localhost" {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
 	if h.pauseProvider == nil {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(PauseResponse{OK: false, Message: "not configured"})

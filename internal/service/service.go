@@ -389,14 +389,17 @@ func (s *Service) tick(ctx context.Context) {
 	}
 
 	// g. Apply rules based on current mode.
-	// В режиме обучения или entertainment_paused — не блокируем.
+	// В режиме обучения — не блокируем.
+	// В режиме entertainment_paused/self_entertainment_paused — принудительно блокируем.
 	limitMinutes := schedState.LimitMinutes + s.bonusSeconds/60
 	if limitMinutes < 0 {
 		limitMinutes = 0
 	}
-	shouldBlock := enforcer.ShouldBlock(schedState.Mode, s.entertainmentSeconds, limitMinutes)
 
-	if shouldBlock && !isLearning && !s.IsEntertainmentPaused() {
+	entPaused := s.IsEntertainmentPaused()
+	shouldBlock := enforcer.ShouldBlock(schedState.Mode, s.entertainmentSeconds, limitMinutes) || entPaused
+
+	if shouldBlock && !isLearning {
 		// Notify once when entertainment limit is reached.
 		if schedState.Mode == scheduler.ModeInsideWindow && !s.notifiedLimitReached {
 			msg := "Entertainment time is over. Restricted apps will be closed."
@@ -606,7 +609,6 @@ func (s *Service) blockRestricted(
 		if p.IsSystem || p.IsAllowed {
 			continue
 		}
-		_ = s.notifier.ShowNotification("Parental Control", msg)
 		if err := s.enforcer.TerminateProcess(ctx, p.PID); err != nil {
 			log.Printf("[service] failed to block process %s (pid %d): %v", p.Name, p.PID, err)
 		}
@@ -619,7 +621,7 @@ func (s *Service) blockRestricted(
 		})
 	}
 
-	// Restricted сайты — предупреждение, блокировка на 3-м тике.
+	// Restricted сайты — блокировка на 3-м тике, без всплывающих окон.
 	const siteBlockAfterTicks = 3
 	for _, activity := range browserActivities {
 		if activity.IsAllowed {
@@ -629,9 +631,6 @@ func (s *Service) blockRestricted(
 		ticks := s.siteWarningTicks[activity.Domain]
 
 		if ticks >= siteBlockAfterTicks {
-			// Блокируем — закрываем окно браузера.
-			_ = s.notifier.ShowNotification("Parental Control",
-				fmt.Sprintf("Blocked site: %s", activity.Domain))
 			_ = s.logger.LogEvent(logger.LogEntry{
 				Timestamp: time.Now(),
 				EventType: logger.EventBlock,
@@ -639,19 +638,17 @@ func (s *Service) blockRestricted(
 				Browser:   activity.Browser,
 				Message:   fmt.Sprintf("Blocked site: %s (%s)", activity.Domain, activity.Browser),
 			})
-			// Сбрасываем счётчик после блокировки.
 			delete(s.siteWarningTicks, activity.Domain)
-		} else {
-			// Предупреждение.
-			remaining := siteBlockAfterTicks - ticks
-			warnMsg := fmt.Sprintf("%s\n\nClose the tab within %d ticks or the browser window will be closed.", activity.Domain, remaining)
-			_ = s.notifier.ShowNotification("Parental Control", warnMsg)
+		} else if ticks == 1 {
+			// Показываем предупреждение только один раз на домен.
+			_ = s.notifier.ShowNotification("Parental Control",
+				fmt.Sprintf("%s\n\n%s", activity.Domain, msg))
 			_ = s.logger.LogEvent(logger.LogEntry{
 				Timestamp: time.Now(),
 				EventType: logger.EventWarning,
 				URL:       activity.URL,
 				Browser:   activity.Browser,
-				Message:   fmt.Sprintf("Warning: site %s will be blocked in %d ticks", activity.Domain, remaining),
+				Message:   fmt.Sprintf("Warning: site %s will be blocked", activity.Domain),
 			})
 		}
 	}
@@ -1218,8 +1215,12 @@ func (s *Service) ChangeConfigURL(password, newURL string) (bool, string) {
 // SelfPauseEntertainment — пауза развлечений без пароля (от ребёнка).
 func (s *Service) SelfPauseEntertainment() (bool, string) {
 	s.pauseMu.Lock()
+	if s.serviceMode != "normal" {
+		s.pauseMu.Unlock()
+		return false, "Cannot pause: admin mode is active"
+	}
 	s.serviceMode = "self_entertainment_paused"
-	s.modeUntil = time.Time{} // бессрочно до ручной отмены
+	s.modeUntil = time.Time{}
 	s.pauseMu.Unlock()
 
 	_ = s.logger.LogEvent(logger.LogEntry{
@@ -1380,22 +1381,27 @@ func (s *Service) ReceiveBrowserURLs(urls []httplog.BrowserURLEntry) ([]uintptr,
 	now := time.Now()
 	schedState := s.scheduler.CurrentState(now)
 
-	shouldBlock := enforcer.ShouldBlock(schedState.Mode, s.entertainmentSeconds, schedState.LimitMinutes)
+	entPaused := s.IsEntertainmentPaused()
+	shouldBlock := enforcer.ShouldBlock(schedState.Mode, s.entertainmentSeconds, schedState.LimitMinutes) || entPaused
 	if !shouldBlock {
 		return nil, ""
 	}
 
 	// Определяем причину блокировки.
 	var reason string
-	switch schedState.Mode {
-	case scheduler.ModeSleepTime:
-		reason = "Sleep time. Entertainment sites are blocked."
-	case scheduler.ModeOutsideWindow:
-		reason = "No entertainment window now. Site is blocked."
-	case scheduler.ModeInsideWindow:
-		reason = "Entertainment time is over for today. Site is blocked."
-	default:
-		reason = "Access to this site is currently blocked."
+	if entPaused {
+		reason = "Entertainment is paused. Sites are blocked."
+	} else {
+		switch schedState.Mode {
+		case scheduler.ModeSleepTime:
+			reason = "Sleep time. Entertainment sites are blocked."
+		case scheduler.ModeOutsideWindow:
+			reason = "No entertainment window now. Site is blocked."
+		case scheduler.ModeInsideWindow:
+			reason = "Entertainment time is over for today. Site is blocked."
+		default:
+			reason = "Access to this site is currently blocked."
+		}
 	}
 
 	var closeHWNDs []uintptr
