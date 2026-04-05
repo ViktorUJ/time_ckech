@@ -407,7 +407,18 @@ func scanBrowserWindows() []browserURLEntry {
 		}
 
 		rawURL := getURLFromBrowserWindow(auto, w.hwnd)
+
+		// PWA detection: если URL пустой, проверяем заголовок окна.
 		if rawURL == "" {
+			title := getWindowTitle(w.hwnd)
+			if pwaURL := detectPWAByTitle(title); pwaURL != "" {
+				results = append(results, browserURLEntry{
+					Browser: browser + "-pwa",
+					PID:     w.pid,
+					URL:     pwaURL,
+					HWND:    w.hwnd,
+				})
+			}
 			continue
 		}
 
@@ -425,6 +436,46 @@ func scanBrowserWindows() []browserURLEntry {
 	}
 
 	return results
+}
+
+// getWindowTitle возвращает заголовок окна.
+func getWindowTitle(hwnd uintptr) string {
+	tLen, _, _ := pGetWindowTextLengthW.Call(hwnd)
+	if tLen == 0 {
+		return ""
+	}
+	buf := make([]uint16, tLen+1)
+	pGetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(&buf[0])), tLen+1)
+	return syscall.UTF16ToString(buf)
+}
+
+// pwaPatterns — известные PWA приложения: заголовок окна → URL.
+var pwaPatterns = []struct {
+	titleContains string
+	url           string
+}{
+	{"YouTube", "https://www.youtube.com/"},
+	{"Netflix", "https://www.netflix.com/"},
+	{"Twitch", "https://www.twitch.tv/"},
+	{"Disney+", "https://www.disneyplus.com/"},
+	{"TikTok", "https://www.tiktok.com/"},
+	{"Spotify", "https://open.spotify.com/"},
+	{"Twitter", "https://twitter.com/"},
+	{"Instagram", "https://www.instagram.com/"},
+	{"Facebook", "https://www.facebook.com/"},
+	{"Reddit", "https://www.reddit.com/"},
+	{"VK", "https://vk.com/"},
+}
+
+// detectPWAByTitle определяет PWA по заголовку окна.
+func detectPWAByTitle(title string) string {
+	lower := strings.ToLower(title)
+	for _, p := range pwaPatterns {
+		if strings.Contains(lower, strings.ToLower(p.titleContains)) {
+			return p.url
+		}
+	}
+	return ""
 }
 
 func detectBrowserByPID(pid uint32) string {

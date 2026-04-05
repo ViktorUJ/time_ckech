@@ -12,10 +12,12 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/getlantern/systray"
@@ -338,6 +340,9 @@ func pollStatus() {
 		systray.SetTooltip(formatStatus(s))
 	}
 
+	// Запускаем browser-agent если не запущен.
+	ensureBrowserAgent()
+
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	for range ticker.C {
@@ -348,8 +353,10 @@ func pollStatus() {
 			systray.SetTooltip(tr("tray.title") + ": " + tr("status.unavailable"))
 		}
 
-		// Проверяем уведомления от сервиса.
 		checkNotifications(notifURL)
+
+		// Проверяем browser-agent каждый тик.
+		ensureBrowserAgent()
 	}
 }
 
@@ -837,6 +844,53 @@ func handleSelfPause() {
 		}
 		resp.Body.Close()
 		refreshStatusNow()
+	}
+}
+
+var agentRestartCount int
+var agentLastRestart time.Time
+
+// ensureBrowserAgent проверяет что browser-agent.exe запущен, если нет — запускает.
+func ensureBrowserAgent() {
+	cmd := exec.Command("tasklist", "/FI", "IMAGENAME eq browser-agent.exe", "/NH")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.Output()
+	if err != nil {
+		return
+	}
+	if strings.Contains(string(out), "browser-agent.exe") {
+		return
+	}
+
+	exePath, err := os.Executable()
+	if err != nil {
+		return
+	}
+	agentPath := filepath.Join(filepath.Dir(exePath), "browser-agent.exe")
+	if _, err := os.Stat(agentPath); err != nil {
+		return
+	}
+
+	agentCmd := exec.Command(agentPath)
+	agentCmd.Dir = filepath.Dir(agentPath)
+	_ = agentCmd.Start()
+
+	// Логируем перезапуск на сервер.
+	now := time.Now()
+	agentRestartCount++
+
+	// Если перезапускается слишком часто (>3 раз за 5 минут) — подозрительно.
+	if agentRestartCount > 3 && now.Sub(agentLastRestart) < 5*time.Minute {
+		postJSON(baseURL+"/add-usage", map[string]interface{}{
+			"password": "", "minutes": 0,
+			"reason": fmt.Sprintf("browser-agent killed %d times (suspicious)", agentRestartCount),
+		})
+	}
+	agentLastRestart = now
+
+	// Сбрасываем счётчик каждые 10 минут.
+	if now.Sub(agentLastRestart) > 10*time.Minute {
+		agentRestartCount = 0
 	}
 }
 

@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"strings"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc/eventlog"
@@ -97,6 +100,104 @@ func (n *windowsNotifier) ShowNotification(title, message string) error {
 	if n.queue != nil {
 		n.queue(title, message)
 	}
+	return nil
+}
+
+// isProcessRunning проверяет запущен ли процесс с указанным именем.
+func isProcessRunning(name string) bool {
+	cmd := exec.Command("tasklist", "/FI", fmt.Sprintf("IMAGENAME eq %s", name), "/NH")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), name)
+}
+
+// launchInUserSession запускает процесс в активной пользовательской сессии.
+func launchInUserSession(exePath string) error {
+	wtsapi32 := windows.NewLazySystemDLL("wtsapi32.dll")
+	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
+	advapi32 := windows.NewLazySystemDLL("advapi32.dll")
+	userenv := windows.NewLazySystemDLL("userenv.dll")
+
+	procWTSGetActiveConsoleSessionId := kernel32.NewProc("WTSGetActiveConsoleSessionId")
+	procWTSQueryUserToken := wtsapi32.NewProc("WTSQueryUserToken")
+	procCreateEnvironmentBlock := userenv.NewProc("CreateEnvironmentBlock")
+	procDestroyEnvironmentBlock := userenv.NewProc("DestroyEnvironmentBlock")
+	procCreateProcessAsUserW := advapi32.NewProc("CreateProcessAsUserW")
+
+	sessionID, _, _ := procWTSGetActiveConsoleSessionId.Call()
+	if sessionID == 0xFFFFFFFF {
+		return fmt.Errorf("no active session")
+	}
+
+	var userToken windows.Handle
+	r, _, err := procWTSQueryUserToken.Call(sessionID, uintptr(unsafe.Pointer(&userToken)))
+	if r == 0 {
+		return fmt.Errorf("WTSQueryUserToken: %v", err)
+	}
+	defer windows.CloseHandle(userToken)
+
+	var envBlock uintptr
+	procCreateEnvironmentBlock.Call(uintptr(unsafe.Pointer(&envBlock)), uintptr(userToken), 0)
+	if envBlock != 0 {
+		defer procDestroyEnvironmentBlock.Call(envBlock)
+	}
+
+	cmdLine, _ := windows.UTF16PtrFromString(`"` + exePath + `"`)
+
+	const CREATE_UNICODE_ENVIRONMENT = 0x00000400
+	const CREATE_NO_WINDOW = 0x08000000
+
+	type STARTUPINFO struct {
+		Cb            uint32
+		_             *uint16
+		Desktop       *uint16
+		_             *uint16
+		_             uint32
+		_             uint32
+		_             uint32
+		_             uint32
+		_             uint32
+		_             uint32
+		_             uint32
+		_             uint32
+		ShowWindow    uint16
+		_             uint16
+		_             *byte
+		StdInput      windows.Handle
+		StdOutput     windows.Handle
+		StdError      windows.Handle
+	}
+	type PROCESS_INFORMATION struct {
+		Process   windows.Handle
+		Thread    windows.Handle
+		ProcessId uint32
+		ThreadId  uint32
+	}
+
+	desktop, _ := windows.UTF16PtrFromString("winsta0\\default")
+	si := STARTUPINFO{Desktop: desktop}
+	si.Cb = uint32(unsafe.Sizeof(si))
+	var pi PROCESS_INFORMATION
+
+	r, _, err = procCreateProcessAsUserW.Call(
+		uintptr(userToken),
+		0,
+		uintptr(unsafe.Pointer(cmdLine)),
+		0, 0, 0,
+		CREATE_UNICODE_ENVIRONMENT|CREATE_NO_WINDOW,
+		envBlock,
+		0,
+		uintptr(unsafe.Pointer(&si)),
+		uintptr(unsafe.Pointer(&pi)),
+	)
+	if r == 0 {
+		return fmt.Errorf("CreateProcessAsUser: %v", err)
+	}
+	windows.CloseHandle(pi.Process)
+	windows.CloseHandle(pi.Thread)
 	return nil
 }
 

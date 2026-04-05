@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"golang.org/x/sys/windows/svc"
@@ -27,6 +28,8 @@ import (
 )
 
 const serviceName = "ParentalControlService"
+
+const installDir = `C:\Program Files\ParentalControlService`
 
 // Paths.
 const (
@@ -84,6 +87,20 @@ func (h *parentalControlHandler) Execute(args []string, requests <-chan svc.Chan
 
 	// Report that we are now running.
 	status <- svc.Status{State: svc.Running, Accepts: acceptedCmds}
+
+	// Watchdog: проверяем tray и browser-agent каждые 30 секунд.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				ensureUserProcesses()
+			}
+		}
+	}()
 
 	// Process SCM commands.
 	for {
@@ -234,6 +251,23 @@ func initService() (*service.Service, *logger.Logger, error) {
 	httpSrv.SetFileLogProvider(fullLog)
 
 	return svcInstance, lgr, nil
+}
+
+// ensureUserProcesses проверяет что tray.exe и browser-agent.exe запущены.
+func ensureUserProcesses() {
+	for _, name := range []string{"tray.exe", "browser-agent.exe"} {
+		if !isProcessRunning(name) {
+			exePath := filepath.Join(installDir, name)
+			if _, err := os.Stat(exePath); err != nil {
+				continue
+			}
+			if err := launchInUserSession(exePath); err != nil {
+				log.Printf("[watchdog] failed to launch %s: %v", name, err)
+			} else {
+				log.Printf("[watchdog] relaunched %s", name)
+			}
+		}
+	}
 }
 
 // configureRecovery sets the service recovery options so that Windows

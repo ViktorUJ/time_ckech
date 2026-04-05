@@ -69,7 +69,14 @@
       { "name": "Java Update Checker", "executable": "jucheck.exe" },
       { "name": "Java Update Scheduler", "executable": "jusched.exe" },
       { "name": "Realtek Audio QS", "executable": "QSHelper.exe" },
-      { "name": "IPF Helper", "executable": "ipf_helper.exe" }
+      { "name": "IPF Helper", "executable": "ipf_helper.exe" },
+      { "name": "Copilot Language Server", "executable": "copilot-language-server.exe" },
+      { "name": "JetBrains AI Inference", "executable": "full-line-inference.exe" },
+      { "name": "JetBrains File Watcher", "executable": "fsnotifier.exe" },
+      { "name": "Windows Terminal", "executable": "OpenConsole.exe" },
+      { "name": "DAEMON Tools", "executable": "DTAgent.exe" },
+      { "name": "Store Desktop Extension", "executable": "StoreDesktopExtension.exe" },
+      { "name": "MO Notifications", "executable": "MoNotificationUx.exe" }
     ]
   },
   "allowed_sites": {
@@ -199,7 +206,14 @@
       "XboxPcAppFT.exe", "XboxGameBarWidgets.exe",
       "EdgeGameAssist.exe",
       "SEGameTool.exe",
-      "NhNotifSys.exe"
+      "NhNotifSys.exe",
+      "FCPrimal.exe",
+      "AssassinsCreedIIGame.exe",
+      "war3.exe",
+      "h3hota HD.exe",
+      "HD_Launcher.exe",
+      "GameBarPresenceWriter.exe",
+      "FCSplash.exe"
     ],
     "vacations": [
       {
