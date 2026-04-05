@@ -999,6 +999,15 @@ func (s *Service) SetServiceMode(password, mode string, minutes int) (bool, stri
 
 	// Управление learning collector.
 	if mode == "learning" && oldMode != "learning" {
+		// Обновляем конфиг классификации перед стартом.
+		cfg := s.configManager.Current()
+		if cfg != nil {
+			var allowedExes []string
+			for _, a := range cfg.AllowedApps.Apps {
+				allowedExes = append(allowedExes, a.Executable)
+			}
+			s.learningCollector.UpdateConfig(allowedExes, cfg.Schedule.EntertainmentApps)
+		}
 		s.learningCollector.Start()
 	} else if mode != "learning" && oldMode == "learning" {
 		s.learningCollector.Stop()

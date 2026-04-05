@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -18,14 +19,15 @@ import (
 
 // ProcessSummary — агрегированная информация о программе за сессию.
 type ProcessSummary struct {
-	Name           string   `json:"name"`
-	ExePath        string   `json:"exe_path"`
-	Username       string   `json:"username"`
-	Description    string   `json:"description,omitempty"`
-	Company        string   `json:"company,omitempty"`
-	Version        string   `json:"version,omitempty"`
-	FirstSeen      string   `json:"first_seen"`
-	LastSeen       string   `json:"last_seen"`
+	Name            string   `json:"name"`
+	ExePath         string   `json:"exe_path"`
+	Username        string   `json:"username"`
+	Category        string   `json:"category"`
+	Description     string   `json:"description,omitempty"`
+	Company         string   `json:"company,omitempty"`
+	Version         string   `json:"version,omitempty"`
+	FirstSeen       string   `json:"first_seen"`
+	LastSeen        string   `json:"last_seen"`
 	MemoryMinMB     float64  `json:"memory_min_mb"`
 	MemoryMaxMB     float64  `json:"memory_max_mb"`
 	ActiveMinutes   float64  `json:"active_minutes"`
@@ -46,13 +48,15 @@ type LearningReport struct {
 
 // Collector собирает детальную информацию о процессах в режиме обучения.
 type Collector struct {
-	mu         sync.Mutex
-	dataDir    string
-	processes  map[string]*processStat // key = exe_path или name
-	startTime  time.Time
-	lastFlush  time.Time
-	totalTicks int
-	active     bool
+	mu                sync.Mutex
+	dataDir           string
+	processes         map[string]*processStat
+	startTime         time.Time
+	lastFlush         time.Time
+	totalTicks        int
+	active            bool
+	allowedApps       map[string]bool
+	entertainmentApps map[string]bool
 }
 
 // processStat — внутренняя статистика по процессу.
@@ -60,6 +64,7 @@ type processStat struct {
 	Name            string
 	ExePath         string
 	Username        string
+	Category        string
 	Description     string
 	Company         string
 	Version         string
@@ -76,7 +81,72 @@ type processStat struct {
 
 // NewCollector создаёт новый Collector.
 func NewCollector(dataDir string) *Collector {
-	return &Collector{dataDir: dataDir}
+	return &Collector{
+		dataDir:           dataDir,
+		allowedApps:       make(map[string]bool),
+		entertainmentApps: make(map[string]bool),
+	}
+}
+
+// UpdateConfig обновляет списки приложений для классификации.
+func (c *Collector) UpdateConfig(allowedExes []string, entertainmentExes []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.allowedApps = make(map[string]bool)
+	for _, e := range allowedExes {
+		c.allowedApps[strings.ToLower(e)] = true
+	}
+	c.entertainmentApps = make(map[string]bool)
+	for _, e := range entertainmentExes {
+		c.entertainmentApps[strings.ToLower(e)] = true
+	}
+}
+
+// classifyProcess определяет категорию процесса.
+func (c *Collector) classifyProcess(name string) string {
+	lower := strings.ToLower(name)
+	if c.entertainmentApps[lower] {
+		return "entertainment"
+	}
+	if c.allowedApps[lower] {
+		return "allowed"
+	}
+	// Системные процессы Windows.
+	systemProcs := map[string]bool{
+		"svchost.exe": true, "csrss.exe": true, "wininit.exe": true,
+		"services.exe": true, "lsass.exe": true, "smss.exe": true,
+		"dwm.exe": true, "explorer.exe": true, "sihost.exe": true,
+		"taskhostw.exe": true, "ctfmon.exe": true, "conhost.exe": true,
+		"runtimebroker.exe": true, "dllhost.exe": true, "unsecapp.exe": true,
+		"searchhost.exe": true, "startmenuexperiencehost.exe": true,
+		"shellexperiencehost.exe": true, "textinputhost.exe": true,
+		"applicationframehost.exe": true, "backgroundtaskhost.exe": true,
+		"shellhost.exe": true, "widgetservice.exe": true, "widgets.exe": true,
+		"smartscreen.exe": true, "securityhealthsystray.exe": true,
+		"phoneexperiencehost.exe": true, "crossdeviceservice.exe": true,
+		"crossdeviceresume.exe": true, "lockapp.exe": true,
+		"searchprotocolhost.exe": true, "wmiprvse.exe": true,
+		"searchapp.exe": true, "useroobobroker.exe": true,
+		"automodedetect.exe": true, "comppkgsrv.exe": true,
+		"igfxemn.exe": true, "tposd.exe": true,
+		"smartsensecontroller.exe": true, "rtkauduservice64.exe": true,
+		"fnhotkeyutility.exe": true, "fnhotkeycapslknumlk.exe": true,
+		"userssctrl.exe": true, "nahimicapo4volume.exe": true,
+		"monotificationux.exe": true, "systemsettings.exe": true,
+		"cmd.exe": true, "powershell.exe": true, "openconsole.exe": true,
+		"browser-agent.exe": true, "service.exe": true, "tray.exe": true,
+	}
+	if systemProcs[lower] {
+		return "system"
+	}
+	// Паттерны для системных процессов.
+	if strings.HasPrefix(lower, "lenovovantage-") ||
+		strings.HasPrefix(lower, "msedgewebview2") ||
+		strings.HasPrefix(lower, "ipf_") ||
+		strings.Contains(lower, "updater") {
+		return "system"
+	}
+	return "unknown"
 }
 
 // Start начинает сессию сбора данных.
@@ -186,6 +256,7 @@ func (c *Collector) CollectTick() {
 				Name:            g.first.Name,
 				ExePath:         g.first.ExePath,
 				Username:        g.first.Username,
+				Category:        c.classifyProcess(g.first.Name),
 				Description:     g.first.Desc,
 				Company:         g.first.Company,
 				Version:         g.first.Version,
@@ -219,6 +290,7 @@ func (c *Collector) buildReport() *LearningReport {
 			Name:            s.Name,
 			ExePath:         s.ExePath,
 			Username:        s.Username,
+			Category:        s.Category,
 			Description:     s.Description,
 			Company:         s.Company,
 			Version:         s.Version,
