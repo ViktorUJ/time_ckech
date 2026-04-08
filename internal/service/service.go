@@ -59,6 +59,7 @@ type Service struct {
 	currentWindowStart   string
 	currentWindowEnd     string
 	currentDayType       string // текущий тип дня для отслеживания смены
+	currentDate          string // текущая дата для сброса счётчиков при смене дня
 	lastStateSave        time.Time
 	lastTick             time.Time
 	httpServerRunning    bool
@@ -188,6 +189,7 @@ func (s *Service) Run(ctx context.Context) error {
 	startNow := time.Now()
 	schedAtStart := s.scheduler.CurrentState(startNow)
 	s.currentDayType = string(schedAtStart.DayType)
+	s.currentDate = startNow.Format("2006-01-02")
 	startMsg := "ParentalControlService started. Schedule: " + s.currentDayType
 	if schedAtStart.HolidayName != "" {
 		startMsg += " (" + schedAtStart.HolidayName + ")"
@@ -275,16 +277,32 @@ func (s *Service) tick(ctx context.Context) {
 
 	// Log day type change (workday/weekend/holiday).
 	newDayType := string(schedState.DayType)
+	todayDate := now.Format("2006-01-02")
+
+	// Сброс счётчиков при смене календарного дня.
+	if todayDate != s.currentDate && s.currentDate != "" {
+		s.entertainmentSeconds = 0
+		s.computerSeconds = 0
+		s.bonusSeconds = 0
+		s.sleepOverride = nil
+		s.currentWindowStart = ""
+		s.currentWindowEnd = ""
+		s.notifiedLimitReached = false
+		_ = s.logger.LogEvent(logger.LogEntry{
+			Timestamp: now,
+			EventType: logger.EventInfo,
+			Message:   fmt.Sprintf("New day: counters reset (%s → %s)", s.currentDate, todayDate),
+		})
+	}
+	s.currentDate = todayDate
+
 	if newDayType != s.currentDayType {
-		// Сброс счётчиков при смене дня.
-		if s.currentDayType != "" {
-			s.computerSeconds = 0
-			s.bonusSeconds = 0
-			s.sleepOverride = nil
-		}
 		dayMsg := "Schedule: " + newDayType
 		if schedState.HolidayName != "" {
 			dayMsg += " (" + schedState.HolidayName + ")"
+		}
+		if schedState.VacationName != "" {
+			dayMsg += " (" + schedState.VacationName + ")"
 		}
 		_ = s.logger.LogEvent(logger.LogEntry{
 			Timestamp: now,

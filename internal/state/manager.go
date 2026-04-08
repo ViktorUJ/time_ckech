@@ -95,12 +95,16 @@ func (sm *StateManager) Restore(now time.Time) *ServiceState {
 		return &ServiceState{}
 	}
 
-	// If the saved window is valid and now is inside it, keep the counter.
-	if !loaded.WindowStart.IsZero() && !loaded.WindowEnd.IsZero() &&
-		!now.Before(loaded.WindowStart) && now.Before(loaded.WindowEnd) {
-		return loaded
+	// Проверяем что state сохранён сегодня.
+	if loaded.LastSaveTime.IsZero() || loaded.LastSaveTime.Format("2006-01-02") != now.Format("2006-01-02") {
+		// Другой день — сбрасываем счётчики, но сохраняем режим и бонус.
+		log.Printf("[state] new day detected, resetting entertainment/computer counters")
+		return &ServiceState{
+			ServiceMode: loaded.ServiceMode,
+			ModeUntil:   loaded.ModeUntil,
+		}
 	}
 
-	// Different window or no window — reset counter.
-	return &ServiceState{}
+	// Тот же день — возвращаем всё.
+	return loaded
 }
