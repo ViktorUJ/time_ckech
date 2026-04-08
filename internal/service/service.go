@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"sync"
 	"time"
 
@@ -79,6 +80,12 @@ type Service struct {
 	// Очередь уведомлений для tray.
 	notifMu     sync.Mutex
 	notifQueue  []httplog.Notification
+
+	// Системные метрики (обновляются каждый тик).
+	lastCPUPercent    float64
+	lastMemPercent    float64
+	lastNetMBps       float64
+	metricsFunc       func() (cpu, mem, net float64) // callback для получения метрик
 
 	// Пауза: временная приостановка всех ограничений.
 	pauseMu       sync.Mutex
@@ -167,7 +174,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	// Log service start.
-	_ = s.logger.LogEvent(logger.LogEntry{
+	s.logWithBalance(logger.LogEntry{
 		Timestamp: now,
 		EventType: logger.EventServiceStart,
 		Message:   "ParentalControlService started",
@@ -194,7 +201,7 @@ func (s *Service) Run(ctx context.Context) error {
 	if schedAtStart.HolidayName != "" {
 		startMsg += " (" + schedAtStart.HolidayName + ")"
 	}
-	_ = s.logger.LogEvent(logger.LogEntry{
+	s.logWithBalance(logger.LogEntry{
 		Timestamp: startNow,
 		EventType: logger.EventServiceStart,
 		Message:   startMsg,
@@ -233,7 +240,7 @@ func (s *Service) Stop(ctx context.Context) {
 	}
 
 	// Log service stop.
-	_ = s.logger.LogEvent(logger.LogEntry{
+	s.logWithBalance(logger.LogEntry{
 		Timestamp: now,
 		EventType: logger.EventServiceStop,
 		Message:   "ParentalControlService stopped",
@@ -265,6 +272,11 @@ func (s *Service) tick(ctx context.Context) {
 	// Считаем общее время за компьютером (всегда, кроме паузы).
 	s.computerSeconds += int(elapsed.Seconds())
 
+	// Обновляем системные метрики.
+	if s.metricsFunc != nil {
+		s.lastCPUPercent, s.lastMemPercent, s.lastNetMBps = s.metricsFunc()
+	}
+
 	cfg := s.configManager.Current()
 	if cfg == nil {
 		// No config available — fail-closed: block everything except system processes.
@@ -288,7 +300,7 @@ func (s *Service) tick(ctx context.Context) {
 		s.currentWindowStart = ""
 		s.currentWindowEnd = ""
 		s.notifiedLimitReached = false
-		_ = s.logger.LogEvent(logger.LogEntry{
+		s.logWithBalance(logger.LogEntry{
 			Timestamp: now,
 			EventType: logger.EventInfo,
 			Message:   fmt.Sprintf("New day: counters reset (%s → %s)", s.currentDate, todayDate),
@@ -304,7 +316,7 @@ func (s *Service) tick(ctx context.Context) {
 		if schedState.VacationName != "" {
 			dayMsg += " (" + schedState.VacationName + ")"
 		}
-		_ = s.logger.LogEvent(logger.LogEntry{
+		s.logWithBalance(logger.LogEntry{
 			Timestamp: now,
 			EventType: logger.EventInfo,
 			Message:   dayMsg,
@@ -372,8 +384,9 @@ func (s *Service) tick(ctx context.Context) {
 	}
 
 	// f. Update entertainment counter (wall clock, only if restricted activity detected).
-	// В режиме entertainment_paused — не считаем время развлечений.
-	if hasRestrictedActivity && !s.IsEntertainmentPaused() {
+	// В режиме entertainment_paused или unrestricted — не считаем время развлечений.
+	isUnrestricted := s.GetServiceMode() == "unrestricted"
+	if hasRestrictedActivity && !s.IsEntertainmentPaused() && !isUnrestricted {
 		s.entertainmentSeconds += int(elapsed.Seconds())
 
 		// Log which restricted processes/sites are consuming entertainment time.
@@ -422,7 +435,7 @@ func (s *Service) tick(ctx context.Context) {
 		if schedState.Mode == scheduler.ModeInsideWindow && !s.notifiedLimitReached {
 			msg := "Entertainment time is over. Restricted apps will be closed."
 			_ = s.notifier.ShowNotification("Parental Control", msg)
-			_ = s.logger.LogEvent(logger.LogEntry{
+			s.logWithBalance(logger.LogEntry{
 				Timestamp: now,
 				EventType: logger.EventWarning,
 				Message:   msg,
@@ -498,7 +511,7 @@ func (s *Service) configUpdateLoop(ctx context.Context) {
 			newCfg, err := s.configManager.Load(ctx)
 			if err != nil {
 				if errors.Is(err, config.ErrUsedCache) {
-					_ = s.logger.LogEvent(logger.LogEntry{
+					s.logWithBalance(logger.LogEntry{
 						Timestamp: time.Now(),
 						EventType: logger.EventWarning,
 						Message:   "Config update failed (network error). Using cached config.",
@@ -509,7 +522,7 @@ func (s *Service) configUpdateLoop(ctx context.Context) {
 			} else {
 				s.applyConfigChanges(ctx)
 				changes := describeConfigChanges(oldCfg, newCfg)
-				_ = s.logger.LogEvent(logger.LogEntry{
+				s.logWithBalance(logger.LogEntry{
 					Timestamp: time.Now(),
 					EventType: logger.EventInfo,
 					Message:   "Config updated. " + changes,
@@ -574,7 +587,7 @@ func (s *Service) handleSleepMode(ctx context.Context, now time.Time) {
 	if !s.notifiedSleepStart {
 		msg := "Sleep time started. All apps will be closed."
 		_ = s.notifier.ShowNotification("Parental Control", msg)
-		_ = s.logger.LogEvent(logger.LogEntry{
+		s.logWithBalance(logger.LogEntry{
 			Timestamp: now,
 			EventType: logger.EventWarning,
 			Message:   msg,
@@ -601,7 +614,7 @@ func (s *Service) handleSleepMode(ctx context.Context, now time.Time) {
 			if a.IsAllowed {
 				continue
 			}
-			_ = s.logger.LogEvent(logger.LogEntry{
+			s.logWithBalance(logger.LogEntry{
 				Timestamp: now,
 				EventType: logger.EventBlock,
 				URL:       a.URL,
@@ -630,7 +643,7 @@ func (s *Service) blockRestricted(
 		if err := s.enforcer.TerminateProcess(ctx, p.PID); err != nil {
 			log.Printf("[service] failed to block process %s (pid %d): %v", p.Name, p.PID, err)
 		}
-		_ = s.logger.LogEvent(logger.LogEntry{
+		s.logWithBalance(logger.LogEntry{
 			Timestamp:   time.Now(),
 			EventType:   logger.EventBlock,
 			ProcessName: p.Name,
@@ -649,7 +662,7 @@ func (s *Service) blockRestricted(
 		ticks := s.siteWarningTicks[activity.Domain]
 
 		if ticks >= siteBlockAfterTicks {
-			_ = s.logger.LogEvent(logger.LogEntry{
+			s.logWithBalance(logger.LogEntry{
 				Timestamp: time.Now(),
 				EventType: logger.EventBlock,
 				URL:       activity.URL,
@@ -658,10 +671,9 @@ func (s *Service) blockRestricted(
 			})
 			delete(s.siteWarningTicks, activity.Domain)
 		} else if ticks == 1 {
-			// Показываем предупреждение только один раз на домен.
 			_ = s.notifier.ShowNotification("Parental Control",
 				fmt.Sprintf("%s\n\n%s", activity.Domain, msg))
-			_ = s.logger.LogEvent(logger.LogEntry{
+			s.logWithBalance(logger.LogEntry{
 				Timestamp: time.Now(),
 				EventType: logger.EventWarning,
 				URL:       activity.URL,
@@ -706,7 +718,7 @@ func (s *Service) logRestrictedActivity(now time.Time, processes []monitor.Proce
 
 	spent := s.entertainmentSeconds / 60
 	msg := fmt.Sprintf("Entertainment %d min. Active: %s", spent, joinUnique(names))
-	_ = s.logger.LogEvent(logger.LogEntry{
+	s.logWithBalance(logger.LogEntry{
 		Timestamp: now,
 		EventType: logger.EventInfo,
 		Message:   msg,
@@ -740,7 +752,7 @@ func (s *Service) checkWarnings(now time.Time, schedState scheduler.ScheduleStat
 		if s.scheduler.ShouldWarnEntertainment(s.entertainmentSeconds, schedState.LimitMinutes) {
 			remaining := schedState.LimitMinutes - s.entertainmentSeconds/60
 			msg := fmt.Sprintf("Entertainment time ends in %d min.", remaining)
-			_ = s.logger.LogEvent(logger.LogEntry{
+			s.logWithBalance(logger.LogEntry{
 				Timestamp: now,
 				EventType: logger.EventWarning,
 				Message:   msg,
@@ -754,7 +766,7 @@ func (s *Service) checkWarnings(now time.Time, schedState scheduler.ScheduleStat
 			s.lastSleepWarnMinute = 1
 			_ = s.notifier.ShowNotification("Parental Control",
 				fmt.Sprintf("Sleep time starts in %d min.", minutesLeft))
-			_ = s.logger.LogEvent(logger.LogEntry{
+			s.logWithBalance(logger.LogEntry{
 				Timestamp: now,
 				EventType: logger.EventWarning,
 				Message:   fmt.Sprintf("Sleep time starts in %d min.", minutesLeft),
@@ -1009,7 +1021,7 @@ func (s *Service) SetServiceMode(password, mode string, minutes int) (bool, stri
 	if minutes > 0 {
 		msg = fmt.Sprintf("Mode set to %s for %d min.", mode, minutes)
 	}
-	_ = s.logger.LogEvent(logger.LogEntry{
+	s.logWithBalance(logger.LogEntry{
 		Timestamp: time.Now(),
 		EventType: logger.EventInfo,
 		Message:   msg,
@@ -1062,7 +1074,7 @@ func (s *Service) AddUsage(password string, minutes int, reason string) (bool, s
 	if reason != "" {
 		msg += " Reason: " + reason
 	}
-	_ = s.logger.LogEvent(logger.LogEntry{
+	s.logWithBalance(logger.LogEntry{
 		Timestamp: time.Now(),
 		EventType: logger.EventInfo,
 		Message:   msg,
@@ -1094,7 +1106,7 @@ func (s *Service) AdjustBonus(password string, minutes int, reason string) (bool
 	if reason != "" {
 		msg += " Reason: " + reason
 	}
-	_ = s.logger.LogEvent(logger.LogEntry{
+	s.logWithBalance(logger.LogEntry{
 		Timestamp: time.Now(),
 		EventType: logger.EventInfo,
 		Message:   msg,
@@ -1133,7 +1145,7 @@ func (s *Service) AdjustSleep(password string, newStart, newEnd, reason string) 
 	if reason != "" {
 		msg += " Reason: " + reason
 	}
-	_ = s.logger.LogEvent(logger.LogEntry{
+	s.logWithBalance(logger.LogEntry{
 		Timestamp: time.Now(),
 		EventType: logger.EventInfo,
 		Message:   msg,
@@ -1148,7 +1160,7 @@ func (s *Service) ReloadConfig(ctx context.Context) (string, error) {
 	if err != nil {
 		if errors.Is(err, config.ErrUsedCache) {
 			// Сеть недоступна, используем кешированный конфиг.
-			_ = s.logger.LogEvent(logger.LogEntry{
+			s.logWithBalance(logger.LogEntry{
 				Timestamp: time.Now(),
 				EventType: logger.EventWarning,
 				Message:   "Config reload failed (network error). Using cached config.",
@@ -1159,7 +1171,7 @@ func (s *Service) ReloadConfig(ctx context.Context) (string, error) {
 	}
 	s.applyConfigChanges(ctx)
 	changes := describeConfigChanges(oldCfg, newCfg)
-	_ = s.logger.LogEvent(logger.LogEntry{
+	s.logWithBalance(logger.LogEntry{
 		Timestamp: time.Now(),
 		EventType: logger.EventInfo,
 		Message:   "Config reloaded (manual). " + changes,
@@ -1198,7 +1210,7 @@ func (s *Service) ChangePassword(oldPassword, newPassword string) (bool, string)
 		return false, "Failed to save password"
 	}
 
-	_ = s.logger.LogEvent(logger.LogEntry{
+	s.logWithBalance(logger.LogEntry{
 		Timestamp: time.Now(),
 		EventType: logger.EventInfo,
 		Message:   "Password changed",
@@ -1231,7 +1243,7 @@ func (s *Service) ChangeConfigURL(password, newURL string) (bool, string) {
 	// Update config manager with new URL.
 	s.configManager.SetConfigURL(newURL)
 
-	_ = s.logger.LogEvent(logger.LogEntry{
+	s.logWithBalance(logger.LogEntry{
 		Timestamp: time.Now(),
 		EventType: logger.EventInfo,
 		Message:   fmt.Sprintf("Config URL changed: %s → %s", oldURL, newURL),
@@ -1250,7 +1262,7 @@ func (s *Service) SelfPauseEntertainment() (bool, string) {
 	s.modeUntil = time.Time{}
 	s.pauseMu.Unlock()
 
-	_ = s.logger.LogEvent(logger.LogEntry{
+	s.logWithBalance(logger.LogEntry{
 		Timestamp: time.Now(),
 		EventType: logger.EventInfo,
 		Message:   "Entertainment self-paused by user",
@@ -1269,12 +1281,17 @@ func (s *Service) SelfUnpauseEntertainment() (bool, string) {
 	s.modeUntil = time.Time{}
 	s.pauseMu.Unlock()
 
-	_ = s.logger.LogEvent(logger.LogEntry{
+	s.logWithBalance(logger.LogEntry{
 		Timestamp: time.Now(),
 		EventType: logger.EventInfo,
 		Message:   "Entertainment self-pause removed by user",
 	})
 	return true, "Entertainment resumed"
+}
+
+// SetMetricsFunc устанавливает функцию для получения системных метрик.
+func (s *Service) SetMetricsFunc(f func() (cpu, mem, net float64)) {
+	s.metricsFunc = f
 }
 
 // QueueNotification добавляет уведомление в очередь для tray.
@@ -1386,7 +1403,7 @@ func (s *Service) ReceiveBrowserURLs(urls []httplog.BrowserURLEntry) ([]uintptr,
 			if cfg != nil && browser.IsSystemSite(u.URL, cfg.AllowedSites.Sites) {
 				continue
 			}
-			_ = s.logger.LogEvent(logger.LogEntry{
+			s.logWithBalance(logger.LogEntry{
 				Timestamp: time.Now(),
 				EventType: logger.EventInfo,
 				URL:       u.URL,
@@ -1472,6 +1489,29 @@ func (s *Service) classifyBrowserURLs(cfg *config.Config) []browser.BrowserActiv
 		})
 	}
 	return activities
+}
+
+// logWithBalance добавляет текущий баланс в лог-запись и записывает.
+func (s *Service) logWithBalance(entry logger.LogEntry) {
+	schedState := s.scheduler.CurrentState(time.Now())
+	limit := schedState.LimitMinutes + s.bonusSeconds/60
+	if limit < 0 {
+		limit = 0
+	}
+	used := s.entertainmentSeconds / 60
+	left := limit - used
+	if left < 0 {
+		left = 0
+	}
+	entry.EntertainmentUsed = used
+	entry.EntertainmentLimit = limit
+	entry.EntertainmentLeft = left
+	entry.BonusMinutes = s.bonusSeconds / 60
+	entry.ComputerMinutes = s.computerSeconds / 60
+	entry.CPUPercent = math.Round(s.lastCPUPercent*10) / 10
+	entry.MemoryPercent = math.Round(s.lastMemPercent*10) / 10
+	entry.NetMBps = math.Round(s.lastNetMBps*100) / 100
+	_ = s.logger.LogEvent(entry)
 }
 
 // blockMessage returns the user-facing notification message based on the current mode.

@@ -237,6 +237,11 @@ func initService() (*service.Service, *logger.Logger, error) {
 	// Подключаем очередь уведомлений: notifier → service → tray (через HTTP).
 	notifier.queue = svcInstance.QueueNotification
 
+	// Подключаем системные метрики.
+	svcInstance.SetMetricsFunc(getSystemMetrics)
+	// Прогреваем счётчики CPU и сети (первый вызов инициализирует).
+	getSystemMetrics()
+
 	// Set the service as the status provider for the HTTP server.
 	httpSrv.SetStatusProvider(svcInstance)
 	httpSrv.SetConfigProvider(svcInstance)

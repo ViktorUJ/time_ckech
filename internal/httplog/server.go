@@ -1931,6 +1931,35 @@ tr:hover{background:#313244}
 	// Pause banner.
 	writePauseBanner(w, h.statusProvider, lang)
 
+	// Current balance bar.
+	if h.statusProvider != nil {
+		st := h.statusProvider.CurrentStatus()
+		modeLabel := ""
+		if st.ServiceMode != "" && st.ServiceMode != "normal" {
+			ml := serviceModeLabels(lang)
+			if name, ok := ml.modes[st.ServiceMode]; ok {
+				modeLabel = name
+			}
+		}
+		fmt.Fprint(w, `<div style="background:#313244;border-radius:6px;padding:8px 14px;margin-bottom:10px;font-size:0.85rem;display:flex;gap:16px;flex-wrap:wrap">`)
+		if st.LimitMinutes > 0 {
+			fmt.Fprintf(w, `<span style="color:#a6adc8">⏱ %d / %d min</span>`, st.EntertainmentMinutes, st.LimitMinutes)
+			if st.MinutesRemaining > 0 {
+				fmt.Fprintf(w, `<span style="color:#a6e3a1">↳ %d min left</span>`, st.MinutesRemaining)
+			}
+		} else {
+			fmt.Fprintf(w, `<span style="color:#a6adc8">⏱ %d min</span>`, st.EntertainmentMinutes)
+		}
+		if st.BonusMinutes != 0 {
+			fmt.Fprintf(w, `<span style="color:#f9e2af">bonus: %+d</span>`, st.BonusMinutes)
+		}
+		fmt.Fprintf(w, `<span style="color:#a6adc8">💻 %d min</span>`, st.ComputerMinutes)
+		if modeLabel != "" {
+			fmt.Fprintf(w, `<span style="color:#fab387">⚙ %s</span>`, htmlEscape(modeLabel))
+		}
+		fmt.Fprint(w, `</div>`)
+	}
+
 	// Фильтры.
 	fmt.Fprintf(w, `<div class="filters">
 <label>%s: <input type="date" id="dateInput" value="%s"></label>
@@ -1967,10 +1996,9 @@ function applyFilter(){
 }
 </script>`, lang)
 
-	fmt.Fprintf(w, `<table><tr><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th>%s</th></tr>`,
+	fmt.Fprintf(w, `<table><tr><th>%s</th><th>%s</th><th style="color:#a6e3a1">⏱</th><th style="color:#f9e2af">+</th><th style="color:#f38ba8">−</th><th style="color:#89b4fa">💻</th><th style="color:#6c7086">CPU</th><th style="color:#6c7086">MEM</th><th style="color:#6c7086">NET</th><th>%s</th><th>%s</th><th>%s</th></tr>`,
 		ui.colTime, ui.colType, ui.colMessage, ui.colProcess, ui.colURL)
 
-	// Показываем от новых к старым.
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
 		ts := e.Timestamp.Format("15:04:05")
@@ -1978,8 +2006,39 @@ function applyFilter(){
 		if lang != "en" {
 			msg = translateLogMessage(msg, lang)
 		}
-		fmt.Fprintf(w, `<tr class="%s"><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
-			e.EventType, ts, e.EventType, htmlEscape(msg), htmlEscape(e.ProcessName), htmlEscape(e.URL))
+
+		balCol := ""
+		if e.EntertainmentLimit > 0 {
+			balCol = fmt.Sprintf("%d/%d", e.EntertainmentUsed, e.EntertainmentLimit)
+		} else if e.EntertainmentUsed > 0 {
+			balCol = fmt.Sprintf("%d", e.EntertainmentUsed)
+		}
+
+		addCol, subCol := "", ""
+		if e.BonusMinutes > 0 {
+			addCol = fmt.Sprintf("+%d", e.BonusMinutes)
+		} else if e.BonusMinutes < 0 {
+			subCol = fmt.Sprintf("%d", e.BonusMinutes)
+		}
+
+		compCol := ""
+		if e.ComputerMinutes > 0 {
+			compCol = fmt.Sprintf("%d", e.ComputerMinutes)
+		}
+
+		cpuCol, memCol, netCol := "", "", ""
+		if e.CPUPercent > 0 {
+			cpuCol = fmt.Sprintf("%.0f%%", e.CPUPercent)
+		}
+		if e.MemoryPercent > 0 {
+			memCol = fmt.Sprintf("%.0f%%", e.MemoryPercent)
+		}
+		if e.NetMBps > 0.01 {
+			netCol = fmt.Sprintf("%.1f", e.NetMBps)
+		}
+
+		fmt.Fprintf(w, `<tr class="%s"><td>%s</td><td>%s</td><td style="color:#a6e3a1;font-size:0.78rem">%s</td><td style="color:#f9e2af;font-size:0.78rem">%s</td><td style="color:#f38ba8;font-size:0.78rem">%s</td><td style="color:#89b4fa;font-size:0.78rem">%s</td><td style="color:#6c7086;font-size:0.78rem">%s</td><td style="color:#6c7086;font-size:0.78rem">%s</td><td style="color:#6c7086;font-size:0.78rem">%s</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
+			e.EventType, ts, e.EventType, balCol, addCol, subCol, compCol, cpuCol, memCol, netCol, htmlEscape(msg), htmlEscape(e.ProcessName), htmlEscape(e.URL))
 	}
 
 	fmt.Fprint(w, `</table>`)
