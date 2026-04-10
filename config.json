@@ -15,6 +15,7 @@
       { "name": "Total Commander", "executable": "TOTALCMD64.EXE" },
       { "name": "Total Commander (32-bit)", "executable": "TOTALCMD.EXE" },
       { "name": "Zoom", "executable": "Zoom.exe" },
+	  { "name": "Video.UI", "executable": "Video.UI.exe" },
       { "name": "Zoom Meetings", "executable": "ZoomMeeting.exe" },
       { "name": "Slack", "executable": "slack.exe" },
       { "name": "Telegram", "executable": "Telegram.exe" },

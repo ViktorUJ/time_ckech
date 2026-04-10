@@ -83,9 +83,10 @@ type Service struct {
 
 	// Системные метрики (обновляются каждый тик).
 	lastCPUPercent    float64
+	lastGPUPercent    float64
 	lastMemPercent    float64
 	lastNetMBps       float64
-	metricsFunc       func() (cpu, mem, net float64) // callback для получения метрик
+	metricsFunc       func() (cpu, gpu, mem, net float64) // callback для получения метрик
 
 	// Пауза: временная приостановка всех ограничений.
 	pauseMu       sync.Mutex
@@ -274,7 +275,7 @@ func (s *Service) tick(ctx context.Context) {
 
 	// Обновляем системные метрики.
 	if s.metricsFunc != nil {
-		s.lastCPUPercent, s.lastMemPercent, s.lastNetMBps = s.metricsFunc()
+		s.lastCPUPercent, s.lastGPUPercent, s.lastMemPercent, s.lastNetMBps = s.metricsFunc()
 	}
 
 	cfg := s.configManager.Current()
@@ -1290,7 +1291,7 @@ func (s *Service) SelfUnpauseEntertainment() (bool, string) {
 }
 
 // SetMetricsFunc устанавливает функцию для получения системных метрик.
-func (s *Service) SetMetricsFunc(f func() (cpu, mem, net float64)) {
+func (s *Service) SetMetricsFunc(f func() (cpu, gpu, mem, net float64)) {
 	s.metricsFunc = f
 }
 
@@ -1426,7 +1427,11 @@ func (s *Service) ReceiveBrowserURLs(urls []httplog.BrowserURLEntry) ([]uintptr,
 	schedState := s.scheduler.CurrentState(now)
 
 	entPaused := s.IsEntertainmentPaused()
-	shouldBlock := enforcer.ShouldBlock(schedState.Mode, s.entertainmentSeconds, schedState.LimitMinutes) || entPaused
+	effectiveLimit := schedState.LimitMinutes + s.bonusSeconds/60
+	if effectiveLimit < 0 {
+		effectiveLimit = 0
+	}
+	shouldBlock := enforcer.ShouldBlock(schedState.Mode, s.entertainmentSeconds, effectiveLimit) || entPaused
 	if !shouldBlock {
 		return nil, ""
 	}
@@ -1509,6 +1514,7 @@ func (s *Service) logWithBalance(entry logger.LogEntry) {
 	entry.BonusMinutes = s.bonusSeconds / 60
 	entry.ComputerMinutes = s.computerSeconds / 60
 	entry.CPUPercent = math.Round(s.lastCPUPercent*10) / 10
+	entry.GPUPercent = math.Round(s.lastGPUPercent*10) / 10
 	entry.MemoryPercent = math.Round(s.lastMemPercent*10) / 10
 	entry.NetMBps = math.Round(s.lastNetMBps*100) / 100
 	_ = s.logger.LogEvent(entry)

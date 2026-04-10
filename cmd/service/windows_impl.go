@@ -202,9 +202,9 @@ func launchInUserSession(exePath string) error {
 }
 
 // getSystemMetrics возвращает CPU%, Memory%, Network MB/s через WMI/системные вызовы.
-func getSystemMetrics() (cpuPct, memPct, netMBps float64) {
-	// CPU — через GetSystemTimes.
+func getSystemMetrics() (cpuPct, gpuPct, memPct, netMBps float64) {
 	cpuPct = getCPUUsage()
+	gpuPct = getGPUUsage()
 
 	// Memory — через GlobalMemoryStatusEx.
 	type memStatusEx struct {
@@ -274,6 +274,30 @@ func getCPUUsage() float64 {
 		return 0
 	}
 	return float64(total-idleDiff) / float64(total) * 100
+}
+
+// getGPUUsage возвращает загрузку GPU через Performance Counter.
+func getGPUUsage() float64 {
+	// Используем PowerShell для чтения GPU counter (быстрый однострочник).
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		`(Get-Counter '\GPU Engine(*engtype_3D)\Utilization Percentage' -ErrorAction SilentlyContinue).CounterSamples | Measure-Object -Property CookedValue -Sum | Select-Object -ExpandProperty Sum`)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+	val := strings.TrimSpace(string(out))
+	if val == "" {
+		return 0
+	}
+	// Парсим float с запятой (русская локаль).
+	val = strings.Replace(val, ",", ".", 1)
+	f := 0.0
+	fmt.Sscanf(val, "%f", &f)
+	if f > 100 {
+		f = 100
+	}
+	return f
 }
 
 var lastNetBytesTotal uint64

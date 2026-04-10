@@ -31,6 +31,7 @@ type LogEntry struct {
 	BonusMinutes       int       `json:"bonus,omitempty"`
 	ComputerMinutes    int       `json:"computer,omitempty"`
 	CPUPercent         float64   `json:"cpu_pct,omitempty"`
+	GPUPercent         float64   `json:"gpu_pct,omitempty"`
 	MemoryPercent      float64   `json:"mem_pct,omitempty"`
 	NetMBps            float64   `json:"net_mbps,omitempty"`
 }

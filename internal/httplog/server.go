@@ -1996,7 +1996,7 @@ function applyFilter(){
 }
 </script>`, lang)
 
-	fmt.Fprintf(w, `<table><tr><th>%s</th><th>%s</th><th style="color:#a6e3a1">⏱</th><th style="color:#f9e2af">+</th><th style="color:#f38ba8">−</th><th style="color:#89b4fa">💻</th><th style="color:#6c7086">CPU</th><th style="color:#6c7086">MEM</th><th style="color:#6c7086">NET</th><th>%s</th><th>%s</th><th>%s</th></tr>`,
+	fmt.Fprintf(w, `<table><tr><th>%s</th><th>%s</th><th style="color:#a6e3a1">⏱</th><th style="color:#f9e2af">+</th><th style="color:#f38ba8">−</th><th style="color:#89b4fa">💻</th><th style="color:#6c7086">CPU</th><th style="color:#6c7086">GPU</th><th style="color:#6c7086">MEM</th><th style="color:#6c7086">NET</th><th>%s</th><th>%s</th><th>%s</th></tr>`,
 		ui.colTime, ui.colType, ui.colMessage, ui.colProcess, ui.colURL)
 
 	for i := len(entries) - 1; i >= 0; i-- {
@@ -2026,9 +2026,12 @@ function applyFilter(){
 			compCol = fmt.Sprintf("%d", e.ComputerMinutes)
 		}
 
-		cpuCol, memCol, netCol := "", "", ""
+		cpuCol, gpuCol, memCol, netCol := "", "", "", ""
 		if e.CPUPercent > 0 {
 			cpuCol = fmt.Sprintf("%.0f%%", e.CPUPercent)
+		}
+		if e.GPUPercent > 0 {
+			gpuCol = fmt.Sprintf("%.0f%%", e.GPUPercent)
 		}
 		if e.MemoryPercent > 0 {
 			memCol = fmt.Sprintf("%.0f%%", e.MemoryPercent)
@@ -2037,8 +2040,8 @@ function applyFilter(){
 			netCol = fmt.Sprintf("%.1f", e.NetMBps)
 		}
 
-		fmt.Fprintf(w, `<tr class="%s"><td>%s</td><td>%s</td><td style="color:#a6e3a1;font-size:0.78rem">%s</td><td style="color:#f9e2af;font-size:0.78rem">%s</td><td style="color:#f38ba8;font-size:0.78rem">%s</td><td style="color:#89b4fa;font-size:0.78rem">%s</td><td style="color:#6c7086;font-size:0.78rem">%s</td><td style="color:#6c7086;font-size:0.78rem">%s</td><td style="color:#6c7086;font-size:0.78rem">%s</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
-			e.EventType, ts, e.EventType, balCol, addCol, subCol, compCol, cpuCol, memCol, netCol, htmlEscape(msg), htmlEscape(e.ProcessName), htmlEscape(e.URL))
+		fmt.Fprintf(w, `<tr class="%s"><td>%s</td><td>%s</td><td style="color:#a6e3a1;font-size:0.78rem">%s</td><td style="color:#f9e2af;font-size:0.78rem">%s</td><td style="color:#f38ba8;font-size:0.78rem">%s</td><td style="color:#89b4fa;font-size:0.78rem">%s</td><td style="color:#6c7086;font-size:0.78rem">%s</td><td style="color:#6c7086;font-size:0.78rem">%s</td><td style="color:#6c7086;font-size:0.78rem">%s</td><td style="color:#6c7086;font-size:0.78rem">%s</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
+			e.EventType, ts, e.EventType, balCol, addCol, subCol, compCol, cpuCol, gpuCol, memCol, netCol, htmlEscape(msg), htmlEscape(e.ProcessName), htmlEscape(e.URL))
 	}
 
 	fmt.Fprint(w, `</table>`)
